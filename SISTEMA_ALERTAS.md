@@ -1,0 +1,187 @@
+# Sistema de Gestión de Alertas — Kuepa
+
+> Documento maestro del proyecto. **Léelo al inicio de cada sesión** para entender la
+> filosofía, la arquitectura y el estado de avance, en vez de re-explorar el código.
+> **Manténlo actualizado**: cada vez que se complete un paso, marca el checklist y
+> anota decisiones nuevas en la sección correspondiente.
+
+Última actualización: 2026-06-11
+
+---
+
+## 1. Filosofía del sistema
+
+El objetivo es **anticipar la deserción estudiantil** detectando señales tempranas de
+riesgo y poniéndolas frente al equipo que puede actuar (gestores, coordinación
+académica). Principios:
+
+- **Snapshot histórico, no foto en vivo.** Cada corrida semanal congela el estado de
+  cada estudiante con una `fecha_informe`. El valor no está solo en "quién está en
+  riesgo hoy", sino en **la evolución**: quién mejoró, quién empeoró, qué gestor movió
+  la aguja. Por eso nunca consultamos BigQuery en vivo desde el dashboard.
+- **El estudiante es la unidad de gestión.** Las alertas se consolidan a nivel
+  estudiante aunque la data fuente sea más granular (por materia, por sesión).
+- **Múltiples señales > una sola.** Un alumno con una alerta es ruido; un alumno con
+  varias señales simultáneas (no se conecta + en mora + no asiste + reprueba) es una
+  deserción casi segura. La vista de **riesgo combinado** es el corazón del sistema.
+- **Cada alerta tiene un dueño.** Las alertas de estudiante son para gestores; las
+  operativas (p. ej. profesores que no registran asistencia) van en panel aparte para
+  el equipo correcto.
+- **Identidad visual Kuepa siempre.** Naranja `#FD531E`, verde `#149852`, morado
+  `#9725B9`, fondo oscuro, tipografía Barlow. Reusar componentes existentes
+  (`section-title`, métricas, barras apiladas) en vez de inventar estilos nuevos.
+
+---
+
+## 2. Arquitectura
+
+```
+BigQuery (potent-poetry-284019)
+        │   queries SQL (una por tipo de alerta)
+        ▼
+n8n  ── workflow SEMANAL, un nodo de query por alerta ──┐
+        │                                                │ escribe
+        ▼                                                ▼
+Google Sheet (ID 1hPWt0oBdbJTuIEbkFh1G9V1NDXh_ADKUt3OqJPocxaU)
+   ├─ Hoja 1     → alertas de conexión/login + estado financiero   [EN PROD]
+   ├─ Asistencia → ausentismo (por estudiante × materia)           [POR CREAR]
+   └─ Notas      → reprobación (por estudiante × materia)          [POR CREAR]
+        │
+        ▼
+Streamlit  dashboard_alertas.py  (lee el Sheet con gspread, cache 5 min)
+```
+
+- **Pipeline:** un workflow **semanal de n8n** corre las queries y escribe cada
+  resultado a una pestaña del Sheet. Para alertas nuevas → nodo de query nuevo + pestaña
+  nueva. Los tres nodos deben correr en la **misma ejecución** para que las
+  `fecha_informe` coincidan (es la llave del cruce 360).
+- **Dashboard:** `dashboard_alertas.py` (Streamlit). Lee el Sheet, no BigQuery. Auth vía
+  `st.secrets["gcp_service_account"]` en cloud o `credentials.json` local.
+
+### Llave de cruce
+`user_incremental` + `fecha_informe`. Es el único campo común a las tres fuentes.
+
+### Config de los nodos n8n (no sobreescribir el histórico)
+El trigger semanal hace fan-out a 3 ramas paralelas; cada query va a su **propio** nodo
+Google Sheets (no comparten el code node `clasifica categoría`, que es solo para login).
+
+- **Operation:** `Append or Update Row` · **Mapping:** `Map Automatically`.
+- **Column to match on:** `clave_registro` — columna única que añade cada query nueva.
+  Incluye la fecha del snapshot, así cada semana inserta filas nuevas (no sobreescribe) y
+  re-correr el mismo día actualiza en vez de duplicar. Grano según la fuente:
+  Asistencia = `estudiante|materia|fecha`; Notas = `estudiante|fecha` (resumen por alumno).
+- Las pestañas `Asistencia` / `Notas` deben tener en la fila 1 los nombres de columna
+  exactos del SELECT (ver §3 + `queries/*.sql`) para que el auto-mapping encaje.
+
+### Reto de granularidad (clave para entender el diseño)
+- **Hoja 1**: grano = 1 fila por **estudiante** por fecha.
+- **Asistencia / Notas**: grano = 1 fila por **estudiante × materia**.
+
+Por eso se trabaja en dos niveles:
+- **Detalle** (materia): tablas donde el alumno aparece una vez por materia problemática.
+- **Rollup por estudiante**: derivar `nivel_ausentismo` (el peor de sus materias) y
+  `materias_reprobadas` (conteo). Esto alimenta métricas y la matriz integral.
+
+---
+
+## 3. Fuentes de datos — columnas
+
+### Hoja 1 (login + financiero) — EN PROD
+`user_id`, `user_incremental`, `user_full_name`, `program_name`, `level_name`,
+`alert_type` (SIN ALERTA / ALERTA TIPO 1..5 / SIN CONEXIÓN), `financial_status_name`,
+`gestor_asignado`, `fecha_informe`.
+Derivadas en el código: `gravedad` (rank 0–6), `fin_rank` (0–5), `etapa` (Lectiva/Productiva).
+
+### Asistencia (ausentismo) — query lista
+Dataset `DVKU_SIS`. Salida: `user_incremental`, `NOMBRE_ESTUDIANTE`, `ESTADO_ACADEMICO`,
+`PROGRAMA`, `NIVEL`, `GRUPO`, `ASIGNATURA`, `START_DATE`, `END_DATE`,
+`TOTAL_SESIONES_PROGRAMADAS`, `TOTAL_SESIONES_REGISTRADAS`, `SESIONES_SIN_REGISTRAR`,
+`SESIONES_ASISTIO`, `SESIONES_NO_ASISTIO`, `SESIONES_TARDE`, `SESIONES_PENDIENTE`,
+`PORCENTAJE_ASISTENCIA`, `NIVEL_ALERTA` (🔴 CRÍTICO <50 / 🟡 ALERTA <70 / 🟠 BAJO <85 /
+🟢 NORMAL), `ESTADO_REGISTRO_PROFESORES` (⚠️ PENDIENTE REGISTRO / ✅ TODO REGISTRADO),
+`FECHA_REPORTE` (sirve como snapshot), `clave_registro` (llave única para n8n).
+- **"Activo":** filtra por `academic_status_name` (mismo abanico de estados que Notas:
+  'regular', 'nuevo', 'en riesgo de abandono', 'solicitud de retiro', etc.) → ambas
+  pestañas miran el mismo universo de estudiantes (coherencia para Riesgo 360).
+
+### Notas (reprobación / desempeño académico) — query lista
+Datasets `DVKU_SIS` (estudiantes/estado) + `DSKU_SIS` (notas). Salida (1 fila por
+**estudiante**): `user_incremental`, `user_full_name`, `modalidad` (Bachillerato/Técnico),
+`program_name`, `modulos_cursados`, `modulos_aprobados`, `modulos_reprobados`,
+`nota_promedio`, `fecha_informe`, `clave_registro` (= `estudiante|fecha`, llave única n8n).
+- **Grano:** 1 fila por **estudiante** = resumen **histórico** de su desempeño (NO por materia).
+  Se eligió resumen (no detalle por materia) para no inflar el Sheet con snapshots semanales.
+- **"Cursado"** = materia con nota final publicada (`FINAL_NOTE_VALUE IS NOT NULL`);
+  **"Reprobado"** = nota final no aprobada. **Histórico total** (sin filtro de fecha).
+- **"Activo":** se define con `academic_status_name` de `VKU10_student_info_current_program`
+  (misma fuente que Asistencia) — incluye 'regular', 'nuevo', 'en riesgo de abandono',
+  'solicitud de retiro', etc. (decisión de negocio: esos cuentan como activos).
+- **Estado actual por materia (recuperaciones):** la CTE `desempeno_materia` colapsa cada
+  materia a un solo estado (`MAX(materia_aprobada)` = aprobada si tiene alguna nota
+  aprobatoria). En Kuepa la nota final se **recalcula**: una materia sale reprobada y, tras
+  cumplir entregables, la misma nota aparece aprobada a la semana siguiente. Como cada
+  snapshot lee el estado vigente, `modulos_reprobados` **baja** cuando el estudiante recupera
+  → el comparativo semana vs. semana lo muestra como **mejora** (atribuible al gestor).
+  Por eso `aprobados + reprobados = cursados` exacto (sin doble conteo).
+- **Limitación:** como es resumen, el dashboard muestra *cuántos* módulos reprobó pero no
+  *cuáles*. Si se quiere el detalle por materia, sería un feed adicional.
+
+> Nota: la lista de `program_id` monitoreados coincide entre las tres queries, así que
+> el alcance de programas es consistente.
+
+---
+
+## 4. Diseño de la interfaz
+
+Pestañas superiores (`st.tabs`), sin romper lo existente:
+
+| Pestaña            | Contenido |
+|--------------------|-----------|
+| 🔌 **Conexión**    | El dashboard actual, idéntico (login + financiero). |
+| 📉 **Asistencia**  | Métricas (% global, 🔴 crítico, 🟡 alerta) · barras por programa · tabla estudiante×materia · **panel aparte** "Sesiones sin registrar (docentes)". |
+| 📕 **Reprobación** | Desempeño académico histórico por estudiante: métricas (alumnos con ≥1 reprobada, total módulos reprobados, nota promedio) · barras por programa · tabla por estudiante (cursados / aprobados / reprobados). |
+| 🎯 **Riesgo 360**  | Score integral de 4 señales (login + mora + ausentismo + reprobación) + tabla **"Riesgo Múltiple"** (estudiantes con 2+ alertas). Evolución de la tabla "Doble Riesgo" actual. |
+
+---
+
+## 5. Decisiones tomadas
+
+- Pipeline: **n8n semanal**, un nodo de query + pestaña nueva por alerta (no consultar BQ en vivo).
+- Sesiones sin registrar (docentes): **panel operativo separado**, no se mezcla con el riesgo del estudiante.
+- Navegación: **pestañas superiores**, preservando la vista actual intacta.
+
+---
+
+## 6. Estado de avance
+
+### Fase 1 — Datos (lado n8n)
+- [x] Ajustar query de Notas: agregar `CURRENT_DATE() AS fecha_informe` → en `queries/notas_reprobacion.sql`.
+- [ ] Nodo n8n + pestaña `Asistencia` poblándose semanalmente (SQL en `queries/asistencia_ausentismo.sql`).
+- [ ] Nodo n8n + pestaña `Notas` poblándose semanalmente (SQL en `queries/notas_reprobacion.sql`).
+- [ ] Confirmar que los 3 nodos corren en la misma ejecución (fechas alineadas).
+
+### Fase 2 — Dashboard (código)
+- [x] Loaders `load_asistencia()` / `load_notas()` (leen pestañas Asistencia/Notas, parsean fecha).
+- [x] Envolver la página actual en `st.tabs` bajo `with tab0:` ("🔌 Conexión" intacta).
+- [x] Pestaña 📉 Asistencia (`render_asistencia`): métricas + barras por programa + tabla + panel docentes.
+- [x] Pestaña 📕 Reprobación (`render_reprobacion`): métricas + barras + tabla por estudiante.
+- [x] Pestaña 🎯 Riesgo 360 (`render_riesgo360`): 4 señales + tabla Riesgo Múltiple.
+- [ ] **Pendiente de probar en vivo** (requiere credenciales + las 3 pestañas pobladas).
+- [ ] Comparativos/eficacia week-over-week en las pestañas nuevas (v1 muestra fecha actual).
+
+Notas de implementación: el bloque de contenido original quedó indentado +4 dentro de
+`with tab0:` (sin reescribirlo). Las pestañas nuevas filtran por `fecha_principal` y por el
+filtro de `programas` del sidebar. El gestor para Riesgo 360 sale de `df_principal` (Hoja 1).
+
+---
+
+## 7. Referencias rápidas de código
+
+- App: `dashboard_alertas.py` (~981 líneas, líneas muy largas).
+- Carga de datos: `load_historical_data()` (~L266).
+- Paleta/ranks de alertas: `ALERT_RANK`, `ALERT_COLORS`, `ALERT_ORDER` (~L228–246).
+- Estado financiero: `FIN_ORDER`, `FIN_COLORS`, `FIN_RANK` (~L250–259).
+- Matriz de riesgo (login×financiero): ~L669.
+- Tabla "Doble Riesgo" (a evolucionar → Riesgo Múltiple): ~L744.
+- CSS / identidad visual: ~L16–225.
+- Queries fuente de los nodos n8n: carpeta `queries/` (ver su `README.md`).

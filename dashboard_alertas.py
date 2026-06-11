@@ -386,596 +386,877 @@ if len(df_principal) == 0:
     st.stop()
 
 # ============================================================
-# MÉTRICAS
+# CARGA DE PESTAÑAS NUEVAS: Asistencia y Notas
 # ============================================================
-total_estudiantes = df_principal['user_id'].nunique()
-sin_alerta        = df_principal[df_principal['gravedad'] == 0]['user_id'].nunique()
-alertas_criticas  = df_principal[df_principal['gravedad'] >= 4]['user_id'].nunique()
-pct_sin_alerta    = sin_alerta / total_estudiantes * 100 if total_estudiantes > 0 else 0
+def _get_worksheet_df(sheet_name):
+    try:
+        secrets_info = st.secrets["gcp_service_account"]
+        from google.oauth2.service_account import Credentials
+        scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+        creds = Credentials.from_service_account_info(dict(secrets_info), scopes=scopes)
+        gc = gspread.authorize(creds)
+    except Exception:
+        gc = gspread.service_account(filename=str(CREDENTIALS_FILE))
+    sh = gc.open_by_key(SHEET_ID)
+    ws = sh.worksheet(sheet_name)
+    vals = ws.get_all_values()
+    if not vals:
+        return pd.DataFrame()
+    df = pd.DataFrame(vals[1:], columns=vals[0])
+    return df.loc[:, df.columns != '']
 
-# Métricas financieras
-en_mora      = df_principal[df_principal['financial_status_name'].isin(['Mora temprana','Mora intermedia','Mora avanzada','Baja por mora'])]['user_id'].nunique()
-baja_mora    = df_principal[df_principal['financial_status_name'] == 'Baja por mora']['user_id'].nunique()
-pct_mora     = en_mora / total_estudiantes * 100 if total_estudiantes > 0 else 0
-doble_riesgo = df_principal[
-    (df_principal['gravedad'] >= 3) &
-    (df_principal['financial_status_name'].isin(['Mora avanzada','Baja por mora']))
-]['user_id'].nunique()
-
-if comparar:
-    import datetime
-    # Usar la fecha de comparación más reciente para la comparativa de mejoraron/empeoraron
-    fecha_comp_reciente = max(fechas_comparar)
-    mask_v = df_hist['fecha_informe'] == fecha_comp_reciente
-    if etapas_sel: mask_v &= df_hist['etapa'].isin(etapas_sel)
-    if programas: mask_v &= df_hist['program_name'].isin(programas)
-    if gestores:  mask_v &= df_hist['gestor_asignado'].isin(gestores)
-    df_vieja = df_hist[mask_v]
-
-    df_v = df_vieja[['user_id', 'gravedad', 'gestor_asignado']].rename(columns={'gravedad': 'gravedad_viejo', 'gestor_asignado': 'gestor_responsable'})
-    df_n = df_principal[['user_id', 'user_incremental', 'gravedad', 'user_full_name', 'gestor_asignado']].rename(columns={'gravedad': 'gravedad_nuevo', 'gestor_asignado': 'gestor_actual'})
-    comparativa = pd.merge(df_n, df_v, on='user_id')
-    comparativa['cambio'] = comparativa['gravedad_viejo'] - comparativa['gravedad_nuevo']
-    # gestor_responsable = gestor de la fecha anterior (quien gestionó antes del cambio)
-    mejoraron  = comparativa[comparativa['cambio'] > 0]
-    empeoraron = comparativa[comparativa['cambio'] < 0]
-    estables   = comparativa[comparativa['cambio'] == 0]
-
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("👥 Estudiantes",       total_estudiantes)
-    c2.metric("🟢 Sin Alerta",        sin_alerta,       f"{pct_sin_alerta:.1f}%")
-    c3.metric("✅ Mejoraron",          len(mejoraron),   f"{len(mejoraron)/len(comparativa):.1%}" if len(comparativa) > 0 else "0%")
-    c4.metric("⚠️ Empeoraron",        len(empeoraron),  f"-{len(empeoraron)/len(comparativa):.1%}" if len(comparativa) > 0 else "0%", delta_color="inverse")
-    c5.metric("💳 En Mora",           en_mora,          f"{pct_mora:.1f}%", delta_color="inverse")
-    c6.metric("🚨 Doble Riesgo",      doble_riesgo,     "login + pago", delta_color="off")
-else:
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("👥 Total Estudiantes",  total_estudiantes)
-    c2.metric("🟢 Sin Alerta",         sin_alerta,       f"{pct_sin_alerta:.1f}%")
-    c3.metric("🔴 Alertas Críticas",   alertas_criticas)
-    c4.metric("💳 En Mora",            en_mora,          f"{pct_mora:.1f}%", delta_color="inverse")
-    c5.metric("🚨 Doble Riesgo",       doble_riesgo,     "login + pago", delta_color="off")
-
-st.divider()
-
-# ============================================================
-# BARRAS APILADAS HORIZONTALES (por programa) — siempre visible
-# ============================================================
-st.markdown(f"<div class='section-title'>Alertas por Programa — {fecha_principal}</div>", unsafe_allow_html=True)
-
-bar_data = df_principal.groupby(['program_name', 'alert_type']).size().reset_index(name='count')
-tipos_presentes = [a for a in ALERT_ORDER if a in bar_data['alert_type'].unique()]
-
-orden = (
-    df_principal[df_principal['gravedad'] >= 3]
-    .groupby('program_name')['user_id'].count()
-    .sort_values(ascending=True).index.tolist()
-)
-for p in df_principal['program_name'].unique():
-    if p not in orden:
-        orden.insert(0, p)
-
-fig_bar = go.Figure()
-for alert in tipos_presentes:
-    subset = bar_data[bar_data['alert_type'] == alert]
-    fig_bar.add_trace(go.Bar(
-        name=alert,
-        y=subset['program_name'],
-        x=subset['count'],
-        orientation='h',
-        marker=dict(color=ALERT_COLORS.get(alert, "#FD531E"), line=dict(width=0)),
-        text=subset['count'],
-        textposition='inside',
-        insidetextanchor='middle',
-        textfont=dict(color='white', size=12, family='Barlow'),
-        hovertemplate=f"<b>{alert}</b><br>%{{y}}<br><b>%{{x}}</b> estudiantes<extra></extra>",
-    ))
-
-fig_bar.update_layout(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(color="#C0C0C0", family="Barlow"),
-    barmode='stack',
-    height=max(420, len(orden) * 52),
-    margin=dict(l=10, r=20, t=60, b=20),
-    yaxis=dict(**AXIS, categoryorder='array', categoryarray=orden),
-    xaxis=dict(**AXIS, title=dict(text="Número de estudiantes", font=dict(color="#656A71", size=12))),
-    legend=dict(
-        orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
-        bgcolor="rgba(0,0,0,0)", font=dict(size=11, color="#C0C0C0"), traceorder="normal"
-    ),
-)
-st.plotly_chart(fig_bar, use_container_width=True)
-
-st.divider()
-
-# ============================================================
-# COMPARATIVA DE FECHAS — Barras verticales apiladas al 100%
-# ============================================================
-if comparar:
-    st.markdown("<div class='section-title'>Comparativa entre Fechas</div>", unsafe_allow_html=True)
-
-    # Reunir todas las fechas a comparar (principal + seleccionadas)
-    todas_fechas = sorted([fecha_principal] + list(fechas_comparar))
-
-    # Calcular distribución por fecha
-    comp_rows = []
-    for fecha in todas_fechas:
-        mask_f = df_hist['fecha_informe'] == fecha
-        if etapas_sel: mask_f &= df_hist['etapa'].isin(etapas_sel)
-        if programas: mask_f &= df_hist['program_name'].isin(programas)
-        if gestores:  mask_f &= df_hist['gestor_asignado'].isin(gestores)
-        df_fecha = df_hist[mask_f]
-        total_fecha = len(df_fecha)
-        for alert in ALERT_ORDER:
-            cnt = len(df_fecha[df_fecha['alert_type'] == alert])
-            pct = (cnt / total_fecha * 100) if total_fecha > 0 else 0
-            comp_rows.append({
-                'fecha': str(fecha),
-                'alert_type': alert,
-                'count': cnt,
-                'pct': pct
-            })
-    comp_df = pd.DataFrame(comp_rows)
-
-    # Tipos presentes en la comparativa
-    tipos_comp = [a for a in ALERT_ORDER if a in comp_df[comp_df['count'] > 0]['alert_type'].unique()]
-
-    col_chart, col_donut = st.columns([2, 1])
-
-    with col_chart:
-        fig_comp = go.Figure()
-        for alert in tipos_comp:
-            subset = comp_df[comp_df['alert_type'] == alert]
-            # Formatear números con separador de miles (punto)
-            text_vals = [f"{int(c):,}".replace(",", ".") for c in subset['count']]
-            fig_comp.add_trace(go.Bar(
-                name=alert,
-                x=subset['fecha'],
-                y=subset['pct'],
-                marker=dict(
-                    color=ALERT_COLORS.get(alert, "#FD531E"),
-                    line=dict(width=0)
-                ),
-                text=text_vals,
-                textposition='inside',
-                insidetextanchor='middle',
-                textfont=dict(color='white', size=13, family='Barlow Condensed'),
-                customdata=subset['count'],
-                hovertemplate=f"<b>{alert}</b><br>%{{x}}<br><b>%{{customdata}}</b> estudiantes (%{{y:.1f}}%)<extra></extra>",
-            ))
-
-        fig_comp.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#C0C0C0", family="Barlow"),
-            barmode='stack',
-            barnorm='',  # Ya calculamos % manualmente
-            height=480,
-            margin=dict(l=10, r=10, t=20, b=60),
-            xaxis=dict(
-                type="category",  # Fuerza categorías discretas, sin fechas intermedias
-                tickfont=dict(color="#FAFAFA", family="Barlow Condensed", size=14),
-                linecolor="#3A3A3A",
-                gridcolor="rgba(0,0,0,0)",
-            ),
-            yaxis=dict(
-                tickfont=dict(color="#C0C0C0", family="Barlow", size=11),
-                linecolor="#3A3A3A",
-                gridcolor="#2E2E2E",
-                ticksuffix="%",
-                range=[0, 100],
-                dtick=10,
-            ),
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
-                bgcolor="rgba(0,0,0,0)", font=dict(size=11, color="#C0C0C0"), traceorder="normal"
-            ),
-            bargap=0.3,
-        )
-        st.plotly_chart(fig_comp, use_container_width=True)
-
-    with col_donut:
-        st.markdown("<div class='section-title'>Resumen de Cambios</div>", unsafe_allow_html=True)
-        fig_donut = go.Figure(data=[go.Pie(
-            labels=["Mejoraron", "Empeoraron", "Estables"],
-            values=[len(mejoraron), len(empeoraron), len(estables)],
-            hole=0.65,
-            marker=dict(
-                colors=["#149852", "#FD531E", "#9725B9"],
-                line=dict(color="#1A1A1A", width=3)
-            ),
-            textfont=dict(color="white", size=12, family="Barlow"),
-            hovertemplate="<b>%{label}</b><br>%{value} estudiantes (%{percent})<extra></extra>",
-        )])
-        fig_donut.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#C0C0C0", family="Barlow"),
-            height=400, margin=dict(l=10, r=10, t=20, b=10),
-            showlegend=True,
-            legend=dict(orientation="v", font=dict(size=12, color="#C0C0C0"), bgcolor="rgba(0,0,0,0)"),
-            annotations=[dict(
-                text=f"<b>{len(comparativa)}</b><br><span style='font-size:11px'>estudiantes</span>",
-                x=0.5, y=0.5, font_size=20, showarrow=False,
-                font=dict(color="#FAFAFA", family="Barlow")
-            )]
-        )
-        st.plotly_chart(fig_donut, use_container_width=True)
-
-    st.divider()
-
-    # Tabla de empeoraron
-    st.markdown("<div class='section-title'>Estudiantes que Empeoraron</div>", unsafe_allow_html=True)
-    if len(empeoraron) > 0:
-        st.dataframe(
-            empeoraron[['user_incremental', 'user_full_name', 'gestor_responsable', 'gravedad_viejo', 'gravedad_nuevo']]
-            .sort_values('gravedad_nuevo', ascending=False)
-            .reset_index(drop=True)
-            .rename(columns={
-                'user_incremental':    'ID',
-                'user_full_name':      'Estudiante',
-                'gestor_responsable':  'Gestor Responsable',
-                'gravedad_viejo':      'Gravedad Anterior',
-                'gravedad_nuevo':      'Gravedad Actual'
-            }),
-            use_container_width=True, height=340
-        )
+def _parse_fecha_series(s):
+    s = s.astype(str).str.strip()
+    sample = s.iloc[0] if len(s) > 0 else ''
+    if '/' in sample:
+        dt = pd.to_datetime(s, format='%d/%m/%Y', errors='coerce')
+    elif '-' in sample and len(sample) >= 10 and len(sample.split('-')[0]) == 4:
+        dt = pd.to_datetime(s, format='%Y-%m-%d', errors='coerce')
     else:
-        st.success("✅ Ningún estudiante empeoró entre las fechas seleccionadas.")
+        dt = pd.to_datetime(s, dayfirst=True, errors='coerce')
+    return dt.dt.date
 
+@st.cache_data(ttl=300)
+def load_asistencia():
+    try:
+        df = _get_worksheet_df("Asistencia")
+    except Exception:
+        return pd.DataFrame()
+    if df.empty or 'FECHA_REPORTE' not in df.columns:
+        return pd.DataFrame()
+    num_cols = ['TOTAL_SESIONES_PROGRAMADAS', 'TOTAL_SESIONES_REGISTRADAS', 'SESIONES_SIN_REGISTRAR',
+                'SESIONES_ASISTIO', 'SESIONES_NO_ASISTIO', 'SESIONES_TARDE', 'SESIONES_PENDIENTE',
+                'PORCENTAJE_ASISTENCIA']
+    for c in num_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.', regex=False), errors='coerce')
+    df['fecha_informe'] = _parse_fecha_series(df['FECHA_REPORTE'])
+    return df.dropna(subset=['fecha_informe'])
+
+@st.cache_data(ttl=300)
+def load_notas():
+    try:
+        df = _get_worksheet_df("Notas")
+    except Exception:
+        return pd.DataFrame()
+    if df.empty or 'fecha_informe' not in df.columns:
+        return pd.DataFrame()
+    for c in ['modulos_cursados', 'modulos_aprobados', 'modulos_reprobados', 'nota_promedio']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.', regex=False), errors='coerce')
+    df['fecha_informe'] = _parse_fecha_series(df['fecha_informe'])
+    return df.dropna(subset=['fecha_informe'])
+
+df_asis_all  = load_asistencia()
+df_notas_all = load_notas()
+
+# Paleta para niveles de asistencia
+ASIS_ORDER  = ['🔴 CRÍTICO', '🟡 ALERTA', '🟠 BAJO', '🟢 NORMAL']
+ASIS_COLORS = {'🔴 CRÍTICO': '#C0392B', '🟡 ALERTA': '#FD531E', '🟠 BAJO': '#F5A623', '🟢 NORMAL': '#149852'}
+
+# ============================================================
+# PESTAÑA: ASISTENCIA
+# ============================================================
+def render_asistencia():
+    if df_asis_all.empty:
+        st.info("Aún no hay datos de asistencia. Verifica que la pestaña 'Asistencia' del Sheet esté poblada.")
+        return
+    d = df_asis_all[df_asis_all['fecha_informe'] == fecha_principal].copy()
+    if programas:
+        d = d[d['PROGRAMA'].isin(programas)]
+    if len(d) == 0:
+        st.warning("No hay datos de asistencia para los filtros seleccionados.")
+        return
+
+    est      = d['user_incremental'].nunique()
+    criticos = d[d['NIVEL_ALERTA'] == '🔴 CRÍTICO']['user_incremental'].nunique()
+    en_alerta = d[d['NIVEL_ALERTA'] == '🟡 ALERTA']['user_incremental'].nunique()
+    prom     = d['PORCENTAJE_ASISTENCIA'].mean()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("👥 Estudiantes con alerta", est)
+    c2.metric("🔴 Asistencia crítica", criticos)
+    c3.metric("🟡 En alerta", en_alerta)
+    c4.metric("📊 % asistencia prom.", f"{prom:.1f}%" if pd.notna(prom) else "—")
     st.divider()
 
-# ============================================================
-# CARTERA: DISTRIBUCIÓN FINANCIERA + MATRIZ DE RIESGO
-# ============================================================
-col_fin, col_matriz = st.columns([1, 2])
-
-with col_fin:
-    st.markdown("<div class='section-title'>Estado de Cartera</div>", unsafe_allow_html=True)
-
-    fin_counts = df_principal.groupby('financial_status_name')['user_id'].count().reset_index(name='count')
-    fin_counts['rank'] = fin_counts['financial_status_name'].map(FIN_RANK).fillna(99)
-    fin_counts = fin_counts.sort_values('rank')
-
-    fig_fin = go.Figure(data=[go.Pie(
-        labels=fin_counts['financial_status_name'],
-        values=fin_counts['count'],
-        hole=0.6,
-        marker=dict(
-            colors=[FIN_COLORS.get(s, "#656A71") for s in fin_counts['financial_status_name']],
-            line=dict(color="#1A1A1A", width=3)
-        ),
-        textfont=dict(color="white", size=11, family="Barlow"),
-        hovertemplate="<b>%{label}</b><br><b>%{value}</b> estudiantes (%{percent})<extra></extra>",
-        sort=False,
-    )])
-    al_dia_pct = fin_counts[fin_counts['financial_status_name'] == 'Al día']['count'].sum()
-    al_dia_pct = al_dia_pct / total_estudiantes * 100 if total_estudiantes > 0 else 0
-    fig_fin.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#C0C0C0", family="Barlow"),
-        height=320, margin=dict(l=0, r=0, t=10, b=10),
-        showlegend=True,
-        legend=dict(orientation="v", font=dict(size=11, color="#C0C0C0"), bgcolor="rgba(0,0,0,0)", x=0.75, y=0.5),
-        annotations=[dict(
-            text=f"<b>{al_dia_pct:.0f}%</b><br><span style='font-size:10px'>al día</span>",
-            x=0.36, y=0.5, font_size=18, showarrow=False,
-            font=dict(color="#149852", family="Barlow Condensed")
-        )]
-    )
-    st.plotly_chart(fig_fin, use_container_width=True)
-
-with col_matriz:
-    st.markdown("<div class='section-title'>Matriz de Riesgo de Deserción</div>", unsafe_allow_html=True)
-
-    alertas_vis = [a for a in ALERT_ORDER if a in df_principal['alert_type'].unique()]
-    estados_vis  = [f for f in FIN_ORDER if f in df_principal['financial_status_name'].unique()]
-
-    matrix_data = df_principal.groupby(['financial_status_name', 'alert_type'])['user_id'].count().reset_index(name='count')
-
-    z_matrix = []
-    for estado in estados_vis:
-        row_z = []
-        for alerta in alertas_vis:
-            val = matrix_data[
-                (matrix_data['financial_status_name'] == estado) &
-                (matrix_data['alert_type'] == alerta)
-            ]['count'].sum()
-            row_z.append(val)
-        z_matrix.append(row_z)
-
-    alert_rank_map = {a: i for i, a in enumerate(ALERT_ORDER)}
-    risk_matrix, text_matrix2 = [], []
-    for estado in estados_vis:
-        row_r, row_t2 = [], []
-        fr = FIN_RANK.get(estado, 0)
-        for alerta in alertas_vis:
-            ar = alert_rank_map.get(alerta, 0)
-            val = z_matrix[estados_vis.index(estado)][alertas_vis.index(alerta)]
-            riesgo = (fr + ar) if val > 0 else 0
-            row_r.append(riesgo)
-            row_t2.append(f"<b>{int(val)}</b>")
-        risk_matrix.append(row_r)
-        text_matrix2.append(row_t2)
-
-    colorscale = [
-        [0.0,  "#1E4D30"],
-        [0.15, "#149852"],
-        [0.4,  "#F5A623"],
-        [0.65, "#FD531E"],
-        [1.0,  "#7B0000"],
-    ]
-
-    estados_vis_inv = list(reversed(estados_vis))
-    risk_matrix_inv, text_matrix2_inv = [], []
-    for estado in estados_vis_inv:
-        idx = estados_vis.index(estado)
-        risk_matrix_inv.append(risk_matrix[idx])
-        text_matrix2_inv.append(text_matrix2[idx])
-
-    fig_hm = go.Figure(data=go.Heatmap(
-        z=risk_matrix_inv,
-        x=alertas_vis,
-        y=estados_vis_inv,
-        text=text_matrix2_inv,
-        texttemplate="%{text}",
-        textfont=dict(color="white", size=13, family="Barlow Condensed"),
-        colorscale=colorscale,
-        showscale=False,
-        hovertemplate="<b>%{y}</b> + <b>%{x}</b><br>%{text} estudiantes<extra></extra>",
-    ))
-    fig_hm.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#C0C0C0", family="Barlow"),
-        height=320, margin=dict(l=10, r=10, t=10, b=60),
-        xaxis=dict(
-            tickfont=dict(color="#C0C0C0", family="Barlow", size=10),
-            linecolor="#3A3A3A", gridcolor="rgba(0,0,0,0)",
-            tickangle=-20,
-        ),
-        yaxis=dict(
-            tickfont=dict(color="#C0C0C0", family="Barlow", size=11),
-            linecolor="#3A3A3A", gridcolor="rgba(0,0,0,0)",
-        ),
-    )
-    st.plotly_chart(fig_hm, use_container_width=True)
-
-# Tabla de doble riesgo
-st.markdown(
-    "<div class='section-title' style='border-color:#C0392B'>🚨 Estudiantes en Doble Riesgo — Login Crítico + Mora Avanzada</div>",
-    unsafe_allow_html=True
-)
-doble_df = df_principal[
-    (df_principal['gravedad'] >= 3) &
-    (df_principal['financial_status_name'].isin(['Mora avanzada', 'Baja por mora']))
-][['user_incremental', 'user_full_name', 'gestor_asignado', 'alert_type', 'financial_status_name', 'gravedad', 'fin_rank']].copy()
-
-if len(doble_df) > 0:
-    doble_df['riesgo_total'] = doble_df['gravedad'] + doble_df['fin_rank']
-    st.dataframe(
-        doble_df.sort_values('riesgo_total', ascending=False)
-        .drop(columns=['gravedad', 'fin_rank', 'riesgo_total'])
-        .reset_index(drop=True)
-        .rename(columns={
-            'user_incremental':       'ID',
-            'user_full_name':         'Estudiante',
-            'gestor_asignado':        'Gestor',
-            'alert_type':             'Alerta Login',
-            'financial_status_name':  'Estado Financiero',
-        }),
-        use_container_width=True, height=300
-    )
-    st.markdown(
-        f"<p style='color:#C0392B; font-size:0.8rem; font-weight:700'>⚠️ {len(doble_df)} estudiantes con señales combinadas de deserción</p>",
-        unsafe_allow_html=True
-    )
-else:
-    st.success("✅ No hay estudiantes en doble riesgo para esta fecha.")
-
-st.divider()
-
-# ============================================================
-# DESEMPEÑO DE GESTORES
-# ============================================================
-st.markdown("<div class='section-title' style='border-color:#9725B9'>👤 Desempeño de Gestores</div>", unsafe_allow_html=True)
-
-# Filtrar gestores válidos (no vacíos)
-gestores_validos = df_principal[df_principal['gestor_asignado'].notna() & (df_principal['gestor_asignado'] != '')]['gestor_asignado'].unique()
-
-if comparar and len(comparativa) > 0:
-    # ---- MODO COMPARATIVO: Ranking + Scorecard ----
-    # El resultado se atribuye al gestor de la fecha anterior (quien gestionó antes del cambio)
-
-    # Gestores válidos de la fecha anterior
-    gestores_responsables = comparativa[comparativa['gestor_responsable'].notna() & (comparativa['gestor_responsable'] != '')]['gestor_responsable'].unique()
-    comp_con_gestor = comparativa[comparativa['gestor_responsable'].isin(gestores_responsables)]
-    comp_sin_gestor = len(comparativa) - len(comp_con_gestor)
-
-    if comp_sin_gestor > 0:
-        st.markdown(
-            f"<p style='color:#656A71; font-size:0.8rem; margin-bottom:1rem'>📌 {len(comp_con_gestor):,} de {len(comparativa):,} estudiantes tenían gestor en la fecha anterior. Los resultados se atribuyen al gestor que los gestionó.</p>",
-            unsafe_allow_html=True
-        )
-
-    # Construir scorecard por gestor
-    gestor_stats = []
-    for gestor in gestores_responsables:
-        comp_gestor = comparativa[comparativa['gestor_responsable'] == gestor]
-        if len(comp_gestor) == 0:
+    st.markdown("<div class='section-title'>Asistencia por Programa — Nivel de alerta</div>", unsafe_allow_html=True)
+    bar = d.groupby(['PROGRAMA', 'NIVEL_ALERTA']).size().reset_index(name='count')
+    fig = go.Figure()
+    for niv in ASIS_ORDER:
+        sub = bar[bar['NIVEL_ALERTA'] == niv]
+        if sub.empty:
             continue
-        n_total = len(comp_gestor)
-        n_mejor = len(comp_gestor[comp_gestor['cambio'] > 0])
-        n_empeor = len(comp_gestor[comp_gestor['cambio'] < 0])
-        n_estable = len(comp_gestor[comp_gestor['cambio'] == 0])
-        pct_mejor = n_mejor / n_total * 100
-        pct_empeor = n_empeor / n_total * 100
-        pct_estable = n_estable / n_total * 100
-        eficacia_neta = pct_mejor - pct_empeor  # Métrica clave
+        fig.add_trace(go.Bar(
+            name=niv, y=sub['PROGRAMA'], x=sub['count'], orientation='h',
+            marker=dict(color=ASIS_COLORS.get(niv, '#FD531E'), line=dict(width=0)),
+            text=sub['count'], textposition='inside', insidetextanchor='middle',
+            textfont=dict(color='white', size=12, family='Barlow'),
+        ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#C0C0C0", family="Barlow"), barmode='stack',
+        height=max(380, d['PROGRAMA'].nunique() * 50), margin=dict(l=10, r=20, t=50, b=20),
+        xaxis=dict(**AXIS), yaxis=dict(**AXIS),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=11, color="#C0C0C0")),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.divider()
 
-        gestor_stats.append({
-            'Gestor': gestor,
-            'Estudiantes': n_total,
-            'Mejoraron': n_mejor,
-            '% Mejoraron': round(pct_mejor, 1),
-            'Empeoraron': n_empeor,
-            '% Empeoraron': round(pct_empeor, 1),
-            'Estables': n_estable,
-            '% Estables': round(pct_estable, 1),
-            'Eficacia Neta': round(eficacia_neta, 1),
-        })
+    st.markdown("<div class='section-title'>Detalle por Estudiante y Asignatura</div>", unsafe_allow_html=True)
+    cols_t = ['user_incremental', 'NOMBRE_ESTUDIANTE', 'PROGRAMA', 'ASIGNATURA',
+              'PORCENTAJE_ASISTENCIA', 'SESIONES_NO_ASISTIO', 'NIVEL_ALERTA']
+    cols_t = [c for c in cols_t if c in d.columns]
+    st.dataframe(
+        d[cols_t].sort_values('PORCENTAJE_ASISTENCIA').reset_index(drop=True).rename(columns={
+            'user_incremental': 'ID', 'NOMBRE_ESTUDIANTE': 'Estudiante', 'PROGRAMA': 'Programa',
+            'ASIGNATURA': 'Asignatura', 'PORCENTAJE_ASISTENCIA': '% Asistencia',
+            'SESIONES_NO_ASISTIO': 'Sesiones No Asistió', 'NIVEL_ALERTA': 'Nivel',
+        }),
+        use_container_width=True, height=360,
+    )
 
-    if len(gestor_stats) > 0:
-        gestor_df = pd.DataFrame(gestor_stats).sort_values('Eficacia Neta', ascending=False)
-
-        # ---- RANKING VISUAL ----
-        col_rank, col_score = st.columns([1, 1])
-
-        with col_rank:
-            st.markdown("<div class='section-title'>Ranking de Eficacia</div>", unsafe_allow_html=True)
-            st.markdown(
-                "<p style='color:#656A71; font-size:0.78rem; margin-top:-0.8rem; margin-bottom:1rem'>Eficacia neta = % mejoraron − % empeoraron</p>",
-                unsafe_allow_html=True
+    st.divider()
+    st.markdown("<div class='section-title' style='border-color:#9725B9'>⚠️ Panel operativo — Sesiones sin registrar (docentes)</div>", unsafe_allow_html=True)
+    if 'ESTADO_REGISTRO_PROFESORES' in d.columns:
+        doc = d[d['ESTADO_REGISTRO_PROFESORES'] == '⚠️ PENDIENTE REGISTRO']
+        if len(doc) > 0:
+            g = (doc.groupby(['PROGRAMA', 'GRUPO', 'ASIGNATURA'])['SESIONES_SIN_REGISTRAR']
+                 .max().reset_index().sort_values('SESIONES_SIN_REGISTRAR', ascending=False))
+            st.dataframe(
+                g.reset_index(drop=True).rename(columns={
+                    'PROGRAMA': 'Programa', 'GRUPO': 'Grupo', 'ASIGNATURA': 'Asignatura',
+                    'SESIONES_SIN_REGISTRAR': 'Sesiones sin registrar',
+                }),
+                use_container_width=True, height=260,
             )
+            st.markdown(f"<p style='color:#9725B9; font-size:0.8rem; font-weight:700'>⚠️ {len(g)} grupos/asignaturas con sesiones pendientes de registro</p>", unsafe_allow_html=True)
+        else:
+            st.success("✅ Todas las sesiones del periodo están registradas.")
 
-            fig_rank = go.Figure()
+# ============================================================
+# PESTAÑA: REPROBACIÓN
+# ============================================================
+def render_reprobacion():
+    if df_notas_all.empty:
+        st.info("Aún no hay datos de notas. Verifica que la pestaña 'Notas' del Sheet esté poblada.")
+        return
+    d = df_notas_all[df_notas_all['fecha_informe'] == fecha_principal].copy()
+    if programas:
+        d = d[d['program_name'].isin(programas)]
+    if len(d) == 0:
+        st.warning("No hay datos de notas para los filtros seleccionados.")
+        return
 
-            # Colores según eficacia neta
-            colors_rank = ['#149852' if v >= 0 else '#FD531E' for v in gestor_df['Eficacia Neta']]
+    total   = d['user_incremental'].nunique()
+    con_rep = d[d['modulos_reprobados'] > 0]['user_incremental'].nunique()
+    tot_rep = int(d['modulos_reprobados'].sum())
+    prom    = d['nota_promedio'].mean()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("👥 Estudiantes", total)
+    c2.metric("📕 Con ≥1 reprobada", con_rep, f"{con_rep / total * 100:.1f}%" if total else "0%", delta_color="inverse")
+    c3.metric("📚 Módulos reprobados", tot_rep)
+    c4.metric("📊 Nota promedio", f"{prom:.2f}" if pd.notna(prom) else "—")
+    st.divider()
 
-            fig_rank.add_trace(go.Bar(
-                y=gestor_df['Gestor'],
-                x=gestor_df['Eficacia Neta'],
-                orientation='h',
-                marker=dict(color=colors_rank, line=dict(width=0)),
-                text=[f"{v:+.1f}%" for v in gestor_df['Eficacia Neta']],
-                textposition='outside',
-                textfont=dict(color='white', size=12, family='Barlow Condensed'),
-                hovertemplate="<b>%{y}</b><br>Eficacia neta: <b>%{x:.1f}%</b><extra></extra>",
-            ))
+    st.markdown("<div class='section-title'>Módulos Reprobados por Programa</div>", unsafe_allow_html=True)
+    bar = (d.groupby('program_name')['modulos_reprobados'].sum().reset_index()
+           .sort_values('modulos_reprobados'))
+    fig = go.Figure(go.Bar(
+        y=bar['program_name'], x=bar['modulos_reprobados'], orientation='h',
+        marker=dict(color="#C0392B", line=dict(width=0)),
+        text=bar['modulos_reprobados'], textposition='inside', insidetextanchor='middle',
+        textfont=dict(color='white', size=12, family='Barlow'),
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#C0C0C0", family="Barlow"),
+        height=max(380, bar['program_name'].nunique() * 50), margin=dict(l=10, r=20, t=30, b=20),
+        xaxis=dict(**AXIS), yaxis=dict(**AXIS),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.divider()
 
-            fig_rank.update_layout(
+    st.markdown("<div class='section-title'>Desempeño por Estudiante (con reprobaciones)</div>", unsafe_allow_html=True)
+    cols_t = ['user_incremental', 'user_full_name', 'program_name', 'modulos_cursados',
+              'modulos_aprobados', 'modulos_reprobados', 'nota_promedio']
+    cols_t = [c for c in cols_t if c in d.columns]
+    st.dataframe(
+        d[d['modulos_reprobados'] > 0][cols_t].sort_values('modulos_reprobados', ascending=False)
+        .reset_index(drop=True).rename(columns={
+            'user_incremental': 'ID', 'user_full_name': 'Estudiante', 'program_name': 'Programa',
+            'modulos_cursados': 'Cursados', 'modulos_aprobados': 'Aprobados',
+            'modulos_reprobados': 'Reprobados', 'nota_promedio': 'Nota Prom.',
+        }),
+        use_container_width=True, height=360,
+    )
+
+# ============================================================
+# PESTAÑA: RIESGO 360 (cruce de las 4 señales)
+# ============================================================
+def render_riesgo360():
+    base = df_principal.drop_duplicates('user_incremental')[
+        ['user_incremental', 'user_full_name', 'gestor_asignado', 'gravedad', 'financial_status_name']
+    ].copy()
+    base['user_incremental'] = base['user_incremental'].astype(str)
+    base['sig_login'] = base['gravedad'] >= 3
+    base['sig_mora']  = base['financial_status_name'].isin(['Mora avanzada', 'Baja por mora'])
+
+    base['sig_asis'] = False
+    if not df_asis_all.empty:
+        da = df_asis_all[df_asis_all['fecha_informe'] == fecha_principal].copy()
+        da['user_incremental'] = da['user_incremental'].astype(str)
+        worst = da.groupby('user_incremental')['PORCENTAJE_ASISTENCIA'].min()
+        base['sig_asis'] = base['user_incremental'].map(worst < 70).fillna(False)
+
+    base['sig_reprob'] = False
+    if not df_notas_all.empty:
+        dn = df_notas_all[df_notas_all['fecha_informe'] == fecha_principal].drop_duplicates('user_incremental').copy()
+        dn['user_incremental'] = dn['user_incremental'].astype(str)
+        repmap = dn.set_index('user_incremental')['modulos_reprobados'] > 0
+        base['sig_reprob'] = base['user_incremental'].map(repmap).fillna(False)
+
+    for c in ['sig_login', 'sig_mora', 'sig_asis', 'sig_reprob']:
+        base[c] = base[c].astype(bool)
+    base['num_senales'] = base[['sig_login', 'sig_mora', 'sig_asis', 'sig_reprob']].sum(axis=1)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🎯 Riesgo múltiple (2+)", int((base['num_senales'] >= 2).sum()))
+    c2.metric("🚨 3+ señales",          int((base['num_senales'] >= 3).sum()))
+    c3.metric("📉 Asistencia baja",      int(base['sig_asis'].sum()))
+    c4.metric("📕 Con reprobaciones",    int(base['sig_reprob'].sum()))
+    st.divider()
+
+    st.markdown("<div class='section-title' style='border-color:#C0392B'>🚨 Estudiantes en Riesgo Múltiple — 2+ señales simultáneas</div>", unsafe_allow_html=True)
+    multi = base[base['num_senales'] >= 2].copy()
+    if len(multi) == 0:
+        st.success("✅ No hay estudiantes con 2 o más señales de riesgo en esta fecha.")
+        return
+
+    def _senales(r):
+        partes = []
+        if r['sig_login']:  partes.append('🔌 Login')
+        if r['sig_mora']:   partes.append('💳 Mora')
+        if r['sig_asis']:   partes.append('📉 Asistencia')
+        if r['sig_reprob']: partes.append('📕 Reprobación')
+        return '  ·  '.join(partes)
+
+    multi['Señales'] = multi.apply(_senales, axis=1)
+    show = (multi.sort_values('num_senales', ascending=False)
+            [['user_incremental', 'user_full_name', 'gestor_asignado', 'Señales', 'num_senales']]
+            .reset_index(drop=True).rename(columns={
+                'user_incremental': 'ID', 'user_full_name': 'Estudiante',
+                'gestor_asignado': 'Gestor', 'num_senales': '# Señales',
+            }))
+    st.dataframe(show, use_container_width=True, height=420)
+    st.markdown(f"<p style='color:#C0392B; font-size:0.8rem; font-weight:700'>⚠️ {len(multi)} estudiantes con señales combinadas de deserción</p>", unsafe_allow_html=True)
+
+# ============================================================
+# NAVEGACIÓN POR PESTAÑAS
+# ============================================================
+tab0, tab1, tab2, tab3 = st.tabs(["🔌 Conexión", "📉 Asistencia", "📕 Reprobación", "🎯 Riesgo 360"])
+
+with tab0:
+    # ============================================================
+    # MÉTRICAS
+    # ============================================================
+    total_estudiantes = df_principal['user_id'].nunique()
+    sin_alerta        = df_principal[df_principal['gravedad'] == 0]['user_id'].nunique()
+    alertas_criticas  = df_principal[df_principal['gravedad'] >= 4]['user_id'].nunique()
+    pct_sin_alerta    = sin_alerta / total_estudiantes * 100 if total_estudiantes > 0 else 0
+    
+    # Métricas financieras
+    en_mora      = df_principal[df_principal['financial_status_name'].isin(['Mora temprana','Mora intermedia','Mora avanzada','Baja por mora'])]['user_id'].nunique()
+    baja_mora    = df_principal[df_principal['financial_status_name'] == 'Baja por mora']['user_id'].nunique()
+    pct_mora     = en_mora / total_estudiantes * 100 if total_estudiantes > 0 else 0
+    doble_riesgo = df_principal[
+        (df_principal['gravedad'] >= 3) &
+        (df_principal['financial_status_name'].isin(['Mora avanzada','Baja por mora']))
+    ]['user_id'].nunique()
+    
+    if comparar:
+        import datetime
+        # Usar la fecha de comparación más reciente para la comparativa de mejoraron/empeoraron
+        fecha_comp_reciente = max(fechas_comparar)
+        mask_v = df_hist['fecha_informe'] == fecha_comp_reciente
+        if etapas_sel: mask_v &= df_hist['etapa'].isin(etapas_sel)
+        if programas: mask_v &= df_hist['program_name'].isin(programas)
+        if gestores:  mask_v &= df_hist['gestor_asignado'].isin(gestores)
+        df_vieja = df_hist[mask_v]
+    
+        df_v = df_vieja[['user_id', 'gravedad', 'gestor_asignado']].rename(columns={'gravedad': 'gravedad_viejo', 'gestor_asignado': 'gestor_responsable'})
+        df_n = df_principal[['user_id', 'user_incremental', 'gravedad', 'user_full_name', 'gestor_asignado']].rename(columns={'gravedad': 'gravedad_nuevo', 'gestor_asignado': 'gestor_actual'})
+        comparativa = pd.merge(df_n, df_v, on='user_id')
+        comparativa['cambio'] = comparativa['gravedad_viejo'] - comparativa['gravedad_nuevo']
+        # gestor_responsable = gestor de la fecha anterior (quien gestionó antes del cambio)
+        mejoraron  = comparativa[comparativa['cambio'] > 0]
+        empeoraron = comparativa[comparativa['cambio'] < 0]
+        estables   = comparativa[comparativa['cambio'] == 0]
+    
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("👥 Estudiantes",       total_estudiantes)
+        c2.metric("🟢 Sin Alerta",        sin_alerta,       f"{pct_sin_alerta:.1f}%")
+        c3.metric("✅ Mejoraron",          len(mejoraron),   f"{len(mejoraron)/len(comparativa):.1%}" if len(comparativa) > 0 else "0%")
+        c4.metric("⚠️ Empeoraron",        len(empeoraron),  f"-{len(empeoraron)/len(comparativa):.1%}" if len(comparativa) > 0 else "0%", delta_color="inverse")
+        c5.metric("💳 En Mora",           en_mora,          f"{pct_mora:.1f}%", delta_color="inverse")
+        c6.metric("🚨 Doble Riesgo",      doble_riesgo,     "login + pago", delta_color="off")
+    else:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("👥 Total Estudiantes",  total_estudiantes)
+        c2.metric("🟢 Sin Alerta",         sin_alerta,       f"{pct_sin_alerta:.1f}%")
+        c3.metric("🔴 Alertas Críticas",   alertas_criticas)
+        c4.metric("💳 En Mora",            en_mora,          f"{pct_mora:.1f}%", delta_color="inverse")
+        c5.metric("🚨 Doble Riesgo",       doble_riesgo,     "login + pago", delta_color="off")
+    
+    st.divider()
+    
+    # ============================================================
+    # BARRAS APILADAS HORIZONTALES (por programa) — siempre visible
+    # ============================================================
+    st.markdown(f"<div class='section-title'>Alertas por Programa — {fecha_principal}</div>", unsafe_allow_html=True)
+    
+    bar_data = df_principal.groupby(['program_name', 'alert_type']).size().reset_index(name='count')
+    tipos_presentes = [a for a in ALERT_ORDER if a in bar_data['alert_type'].unique()]
+    
+    orden = (
+        df_principal[df_principal['gravedad'] >= 3]
+        .groupby('program_name')['user_id'].count()
+        .sort_values(ascending=True).index.tolist()
+    )
+    for p in df_principal['program_name'].unique():
+        if p not in orden:
+            orden.insert(0, p)
+    
+    fig_bar = go.Figure()
+    for alert in tipos_presentes:
+        subset = bar_data[bar_data['alert_type'] == alert]
+        fig_bar.add_trace(go.Bar(
+            name=alert,
+            y=subset['program_name'],
+            x=subset['count'],
+            orientation='h',
+            marker=dict(color=ALERT_COLORS.get(alert, "#FD531E"), line=dict(width=0)),
+            text=subset['count'],
+            textposition='inside',
+            insidetextanchor='middle',
+            textfont=dict(color='white', size=12, family='Barlow'),
+            hovertemplate=f"<b>{alert}</b><br>%{{y}}<br><b>%{{x}}</b> estudiantes<extra></extra>",
+        ))
+    
+    fig_bar.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#C0C0C0", family="Barlow"),
+        barmode='stack',
+        height=max(420, len(orden) * 52),
+        margin=dict(l=10, r=20, t=60, b=20),
+        yaxis=dict(**AXIS, categoryorder='array', categoryarray=orden),
+        xaxis=dict(**AXIS, title=dict(text="Número de estudiantes", font=dict(color="#656A71", size=12))),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+            bgcolor="rgba(0,0,0,0)", font=dict(size=11, color="#C0C0C0"), traceorder="normal"
+        ),
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+    
+    st.divider()
+    
+    # ============================================================
+    # COMPARATIVA DE FECHAS — Barras verticales apiladas al 100%
+    # ============================================================
+    if comparar:
+        st.markdown("<div class='section-title'>Comparativa entre Fechas</div>", unsafe_allow_html=True)
+    
+        # Reunir todas las fechas a comparar (principal + seleccionadas)
+        todas_fechas = sorted([fecha_principal] + list(fechas_comparar))
+    
+        # Calcular distribución por fecha
+        comp_rows = []
+        for fecha in todas_fechas:
+            mask_f = df_hist['fecha_informe'] == fecha
+            if etapas_sel: mask_f &= df_hist['etapa'].isin(etapas_sel)
+            if programas: mask_f &= df_hist['program_name'].isin(programas)
+            if gestores:  mask_f &= df_hist['gestor_asignado'].isin(gestores)
+            df_fecha = df_hist[mask_f]
+            total_fecha = len(df_fecha)
+            for alert in ALERT_ORDER:
+                cnt = len(df_fecha[df_fecha['alert_type'] == alert])
+                pct = (cnt / total_fecha * 100) if total_fecha > 0 else 0
+                comp_rows.append({
+                    'fecha': str(fecha),
+                    'alert_type': alert,
+                    'count': cnt,
+                    'pct': pct
+                })
+        comp_df = pd.DataFrame(comp_rows)
+    
+        # Tipos presentes en la comparativa
+        tipos_comp = [a for a in ALERT_ORDER if a in comp_df[comp_df['count'] > 0]['alert_type'].unique()]
+    
+        col_chart, col_donut = st.columns([2, 1])
+    
+        with col_chart:
+            fig_comp = go.Figure()
+            for alert in tipos_comp:
+                subset = comp_df[comp_df['alert_type'] == alert]
+                # Formatear números con separador de miles (punto)
+                text_vals = [f"{int(c):,}".replace(",", ".") for c in subset['count']]
+                fig_comp.add_trace(go.Bar(
+                    name=alert,
+                    x=subset['fecha'],
+                    y=subset['pct'],
+                    marker=dict(
+                        color=ALERT_COLORS.get(alert, "#FD531E"),
+                        line=dict(width=0)
+                    ),
+                    text=text_vals,
+                    textposition='inside',
+                    insidetextanchor='middle',
+                    textfont=dict(color='white', size=13, family='Barlow Condensed'),
+                    customdata=subset['count'],
+                    hovertemplate=f"<b>{alert}</b><br>%{{x}}<br><b>%{{customdata}}</b> estudiantes (%{{y:.1f}}%)<extra></extra>",
+                ))
+    
+            fig_comp.update_layout(
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
                 font=dict(color="#C0C0C0", family="Barlow"),
-                height=max(300, len(gestor_df) * 45),
-                margin=dict(l=10, r=80, t=10, b=10),
-                yaxis=dict(
-                    categoryorder='array',
-                    categoryarray=list(reversed(gestor_df['Gestor'].tolist())),
-                    tickfont=dict(color="#C0C0C0", family="Barlow", size=11),
-                    linecolor="#3A3A3A", gridcolor="rgba(0,0,0,0)",
-                ),
+                barmode='stack',
+                barnorm='',  # Ya calculamos % manualmente
+                height=480,
+                margin=dict(l=10, r=10, t=20, b=60),
                 xaxis=dict(
-                    tickfont=dict(color="#C0C0C0", family="Barlow", size=10),
-                    linecolor="#3A3A3A", gridcolor="#2E2E2E",
-                    ticksuffix="%", zeroline=True, zerolinecolor="#656A71", zerolinewidth=1,
+                    type="category",  # Fuerza categorías discretas, sin fechas intermedias
+                    tickfont=dict(color="#FAFAFA", family="Barlow Condensed", size=14),
+                    linecolor="#3A3A3A",
+                    gridcolor="rgba(0,0,0,0)",
                 ),
+                yaxis=dict(
+                    tickfont=dict(color="#C0C0C0", family="Barlow", size=11),
+                    linecolor="#3A3A3A",
+                    gridcolor="#2E2E2E",
+                    ticksuffix="%",
+                    range=[0, 100],
+                    dtick=10,
+                ),
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=11, color="#C0C0C0"), traceorder="normal"
+                ),
+                bargap=0.3,
             )
-            st.plotly_chart(fig_rank, use_container_width=True)
-
-        with col_score:
-            st.markdown("<div class='section-title'>Scorecard por Gestor</div>", unsafe_allow_html=True)
-            st.dataframe(
-                gestor_df[['Gestor', 'Estudiantes', 'Mejoraron', '% Mejoraron', 'Empeoraron', '% Empeoraron', 'Estables', 'Eficacia Neta']]
-                .reset_index(drop=True),
-                use_container_width=True,
-                height=max(300, len(gestor_df) * 45),
+            st.plotly_chart(fig_comp, use_container_width=True)
+    
+        with col_donut:
+            st.markdown("<div class='section-title'>Resumen de Cambios</div>", unsafe_allow_html=True)
+            fig_donut = go.Figure(data=[go.Pie(
+                labels=["Mejoraron", "Empeoraron", "Estables"],
+                values=[len(mejoraron), len(empeoraron), len(estables)],
+                hole=0.65,
+                marker=dict(
+                    colors=["#149852", "#FD531E", "#9725B9"],
+                    line=dict(color="#1A1A1A", width=3)
+                ),
+                textfont=dict(color="white", size=12, family="Barlow"),
+                hovertemplate="<b>%{label}</b><br>%{value} estudiantes (%{percent})<extra></extra>",
+            )])
+            fig_donut.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#C0C0C0", family="Barlow"),
+                height=400, margin=dict(l=10, r=10, t=20, b=10),
+                showlegend=True,
+                legend=dict(orientation="v", font=dict(size=12, color="#C0C0C0"), bgcolor="rgba(0,0,0,0)"),
+                annotations=[dict(
+                    text=f"<b>{len(comparativa)}</b><br><span style='font-size:11px'>estudiantes</span>",
+                    x=0.5, y=0.5, font_size=20, showarrow=False,
+                    font=dict(color="#FAFAFA", family="Barlow")
+                )]
             )
-
+            st.plotly_chart(fig_donut, use_container_width=True)
+    
         st.divider()
-
-        # ---- DRILL-DOWN POR GESTOR ----
-        st.markdown("<div class='section-title'>Detalle por Gestor</div>", unsafe_allow_html=True)
-        gestor_sel = st.selectbox(
-            "Selecciona un gestor para ver sus estudiantes:",
-            gestor_df['Gestor'].tolist(),
-            label_visibility="visible"
-        )
-
-        if gestor_sel:
-            det = comparativa[comparativa['gestor_responsable'] == gestor_sel].copy()
-            det['Estado'] = det['cambio'].apply(
-                lambda x: '✅ Mejoró' if x > 0 else ('⚠️ Empeoró' if x < 0 else '➖ Estable')
-            )
-            det = det.sort_values('cambio', ascending=True)
-
-            # Métricas del gestor seleccionado
-            g_data = gestor_df[gestor_df['Gestor'] == gestor_sel].iloc[0]
-            gc1, gc2, gc3, gc4 = st.columns(4)
-            gc1.metric("Estudiantes", int(g_data['Estudiantes']))
-            gc2.metric("✅ Mejoraron", int(g_data['Mejoraron']), f"{g_data['% Mejoraron']}%")
-            gc3.metric("⚠️ Empeoraron", int(g_data['Empeoraron']), f"-{g_data['% Empeoraron']}%", delta_color="inverse")
-            gc4.metric("Eficacia Neta", f"{g_data['Eficacia Neta']:+.1f}%",
-                       "positiva" if g_data['Eficacia Neta'] >= 0 else "negativa",
-                       delta_color="normal" if g_data['Eficacia Neta'] >= 0 else "inverse")
-
+    
+        # Tabla de empeoraron
+        st.markdown("<div class='section-title'>Estudiantes que Empeoraron</div>", unsafe_allow_html=True)
+        if len(empeoraron) > 0:
             st.dataframe(
-                det[['user_incremental', 'user_full_name', 'gravedad_viejo', 'gravedad_nuevo', 'cambio', 'Estado']]
+                empeoraron[['user_incremental', 'user_full_name', 'gestor_responsable', 'gravedad_viejo', 'gravedad_nuevo']]
+                .sort_values('gravedad_nuevo', ascending=False)
                 .reset_index(drop=True)
                 .rename(columns={
-                    'user_incremental': 'ID',
-                    'user_full_name':   'Estudiante',
-                    'gravedad_viejo':   'Gravedad Anterior',
-                    'gravedad_nuevo':   'Gravedad Actual',
-                    'cambio':           'Cambio',
+                    'user_incremental':    'ID',
+                    'user_full_name':      'Estudiante',
+                    'gestor_responsable':  'Gestor Responsable',
+                    'gravedad_viejo':      'Gravedad Anterior',
+                    'gravedad_nuevo':      'Gravedad Actual'
                 }),
-                use_container_width=True, height=400
+                use_container_width=True, height=340
             )
-    else:
-        st.info("No hay gestores con datos comparativos disponibles.")
-
-else:
-    # ---- MODO FECHA ÚNICA: Distribución por gestor ----
-    st.markdown(
-        "<p style='color:#656A71; font-size:0.85rem; margin-bottom:1rem'>Selecciona una fecha de comparación para ver el ranking de eficacia y scorecard detallado.</p>",
-        unsafe_allow_html=True
-    )
-
-    if len(gestores_validos) > 0:
-        gestor_alert_data = df_principal[df_principal['gestor_asignado'].isin(gestores_validos)] \
-            .groupby(['gestor_asignado', 'alert_type']).size().reset_index(name='count')
-
-        tipos_gestor = [a for a in ALERT_ORDER if a in gestor_alert_data['alert_type'].unique()]
-
-        orden_gestor = (
-            df_principal[df_principal['gravedad'] >= 3]
-            .groupby('gestor_asignado')['user_id'].count()
-            .sort_values(ascending=True).index.tolist()
-        )
-        for g in gestores_validos:
-            if g not in orden_gestor:
-                orden_gestor.insert(0, g)
-
-        fig_gestor = go.Figure()
-        for alert in tipos_gestor:
-            subset = gestor_alert_data[gestor_alert_data['alert_type'] == alert]
-            fig_gestor.add_trace(go.Bar(
-                name=alert,
-                y=subset['gestor_asignado'],
-                x=subset['count'],
-                orientation='h',
-                marker=dict(color=ALERT_COLORS.get(alert, "#FD531E"), line=dict(width=0)),
-                text=subset['count'],
-                textposition='inside',
-                insidetextanchor='middle',
-                textfont=dict(color='white', size=12, family='Barlow'),
-                hovertemplate=f"<b>{alert}</b><br>%{{y}}<br><b>%{{x}}</b> estudiantes<extra></extra>",
-            ))
-
-        fig_gestor.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
+        else:
+            st.success("✅ Ningún estudiante empeoró entre las fechas seleccionadas.")
+    
+        st.divider()
+    
+    # ============================================================
+    # CARTERA: DISTRIBUCIÓN FINANCIERA + MATRIZ DE RIESGO
+    # ============================================================
+    col_fin, col_matriz = st.columns([1, 2])
+    
+    with col_fin:
+        st.markdown("<div class='section-title'>Estado de Cartera</div>", unsafe_allow_html=True)
+    
+        fin_counts = df_principal.groupby('financial_status_name')['user_id'].count().reset_index(name='count')
+        fin_counts['rank'] = fin_counts['financial_status_name'].map(FIN_RANK).fillna(99)
+        fin_counts = fin_counts.sort_values('rank')
+    
+        fig_fin = go.Figure(data=[go.Pie(
+            labels=fin_counts['financial_status_name'],
+            values=fin_counts['count'],
+            hole=0.6,
+            marker=dict(
+                colors=[FIN_COLORS.get(s, "#656A71") for s in fin_counts['financial_status_name']],
+                line=dict(color="#1A1A1A", width=3)
+            ),
+            textfont=dict(color="white", size=11, family="Barlow"),
+            hovertemplate="<b>%{label}</b><br><b>%{value}</b> estudiantes (%{percent})<extra></extra>",
+            sort=False,
+        )])
+        al_dia_pct = fin_counts[fin_counts['financial_status_name'] == 'Al día']['count'].sum()
+        al_dia_pct = al_dia_pct / total_estudiantes * 100 if total_estudiantes > 0 else 0
+        fig_fin.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#C0C0C0", family="Barlow"),
-            barmode='stack',
-            height=max(350, len(gestores_validos) * 50),
-            margin=dict(l=10, r=20, t=60, b=20),
-            yaxis=dict(**AXIS, categoryorder='array', categoryarray=orden_gestor),
-            xaxis=dict(**AXIS, title=dict(text="Número de estudiantes", font=dict(color="#656A71", size=12))),
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
-                bgcolor="rgba(0,0,0,0)", font=dict(size=11, color="#C0C0C0"), traceorder="normal"
+            height=320, margin=dict(l=0, r=0, t=10, b=10),
+            showlegend=True,
+            legend=dict(orientation="v", font=dict(size=11, color="#C0C0C0"), bgcolor="rgba(0,0,0,0)", x=0.75, y=0.5),
+            annotations=[dict(
+                text=f"<b>{al_dia_pct:.0f}%</b><br><span style='font-size:10px'>al día</span>",
+                x=0.36, y=0.5, font_size=18, showarrow=False,
+                font=dict(color="#149852", family="Barlow Condensed")
+            )]
+        )
+        st.plotly_chart(fig_fin, use_container_width=True)
+    
+    with col_matriz:
+        st.markdown("<div class='section-title'>Matriz de Riesgo de Deserción</div>", unsafe_allow_html=True)
+    
+        alertas_vis = [a for a in ALERT_ORDER if a in df_principal['alert_type'].unique()]
+        estados_vis  = [f for f in FIN_ORDER if f in df_principal['financial_status_name'].unique()]
+    
+        matrix_data = df_principal.groupby(['financial_status_name', 'alert_type'])['user_id'].count().reset_index(name='count')
+    
+        z_matrix = []
+        for estado in estados_vis:
+            row_z = []
+            for alerta in alertas_vis:
+                val = matrix_data[
+                    (matrix_data['financial_status_name'] == estado) &
+                    (matrix_data['alert_type'] == alerta)
+                ]['count'].sum()
+                row_z.append(val)
+            z_matrix.append(row_z)
+    
+        alert_rank_map = {a: i for i, a in enumerate(ALERT_ORDER)}
+        risk_matrix, text_matrix2 = [], []
+        for estado in estados_vis:
+            row_r, row_t2 = [], []
+            fr = FIN_RANK.get(estado, 0)
+            for alerta in alertas_vis:
+                ar = alert_rank_map.get(alerta, 0)
+                val = z_matrix[estados_vis.index(estado)][alertas_vis.index(alerta)]
+                riesgo = (fr + ar) if val > 0 else 0
+                row_r.append(riesgo)
+                row_t2.append(f"<b>{int(val)}</b>")
+            risk_matrix.append(row_r)
+            text_matrix2.append(row_t2)
+    
+        colorscale = [
+            [0.0,  "#1E4D30"],
+            [0.15, "#149852"],
+            [0.4,  "#F5A623"],
+            [0.65, "#FD531E"],
+            [1.0,  "#7B0000"],
+        ]
+    
+        estados_vis_inv = list(reversed(estados_vis))
+        risk_matrix_inv, text_matrix2_inv = [], []
+        for estado in estados_vis_inv:
+            idx = estados_vis.index(estado)
+            risk_matrix_inv.append(risk_matrix[idx])
+            text_matrix2_inv.append(text_matrix2[idx])
+    
+        fig_hm = go.Figure(data=go.Heatmap(
+            z=risk_matrix_inv,
+            x=alertas_vis,
+            y=estados_vis_inv,
+            text=text_matrix2_inv,
+            texttemplate="%{text}",
+            textfont=dict(color="white", size=13, family="Barlow Condensed"),
+            colorscale=colorscale,
+            showscale=False,
+            hovertemplate="<b>%{y}</b> + <b>%{x}</b><br>%{text} estudiantes<extra></extra>",
+        ))
+        fig_hm.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#C0C0C0", family="Barlow"),
+            height=320, margin=dict(l=10, r=10, t=10, b=60),
+            xaxis=dict(
+                tickfont=dict(color="#C0C0C0", family="Barlow", size=10),
+                linecolor="#3A3A3A", gridcolor="rgba(0,0,0,0)",
+                tickangle=-20,
+            ),
+            yaxis=dict(
+                tickfont=dict(color="#C0C0C0", family="Barlow", size=11),
+                linecolor="#3A3A3A", gridcolor="rgba(0,0,0,0)",
             ),
         )
-        st.plotly_chart(fig_gestor, use_container_width=True)
+        st.plotly_chart(fig_hm, use_container_width=True)
+    
+    # Tabla de doble riesgo
+    st.markdown(
+        "<div class='section-title' style='border-color:#C0392B'>🚨 Estudiantes en Doble Riesgo — Login Crítico + Mora Avanzada</div>",
+        unsafe_allow_html=True
+    )
+    doble_df = df_principal[
+        (df_principal['gravedad'] >= 3) &
+        (df_principal['financial_status_name'].isin(['Mora avanzada', 'Baja por mora']))
+    ][['user_incremental', 'user_full_name', 'gestor_asignado', 'alert_type', 'financial_status_name', 'gravedad', 'fin_rank']].copy()
+    
+    if len(doble_df) > 0:
+        doble_df['riesgo_total'] = doble_df['gravedad'] + doble_df['fin_rank']
+        st.dataframe(
+            doble_df.sort_values('riesgo_total', ascending=False)
+            .drop(columns=['gravedad', 'fin_rank', 'riesgo_total'])
+            .reset_index(drop=True)
+            .rename(columns={
+                'user_incremental':       'ID',
+                'user_full_name':         'Estudiante',
+                'gestor_asignado':        'Gestor',
+                'alert_type':             'Alerta Login',
+                'financial_status_name':  'Estado Financiero',
+            }),
+            use_container_width=True, height=300
+        )
+        st.markdown(
+            f"<p style='color:#C0392B; font-size:0.8rem; font-weight:700'>⚠️ {len(doble_df)} estudiantes con señales combinadas de deserción</p>",
+            unsafe_allow_html=True
+        )
     else:
-        st.info("No hay gestores asignados en los datos de esta fecha.")
+        st.success("✅ No hay estudiantes en doble riesgo para esta fecha.")
+    
+    st.divider()
+    
+    # ============================================================
+    # DESEMPEÑO DE GESTORES
+    # ============================================================
+    st.markdown("<div class='section-title' style='border-color:#9725B9'>👤 Desempeño de Gestores</div>", unsafe_allow_html=True)
+    
+    # Filtrar gestores válidos (no vacíos)
+    gestores_validos = df_principal[df_principal['gestor_asignado'].notna() & (df_principal['gestor_asignado'] != '')]['gestor_asignado'].unique()
+    
+    if comparar and len(comparativa) > 0:
+        # ---- MODO COMPARATIVO: Ranking + Scorecard ----
+        # El resultado se atribuye al gestor de la fecha anterior (quien gestionó antes del cambio)
+    
+        # Gestores válidos de la fecha anterior
+        gestores_responsables = comparativa[comparativa['gestor_responsable'].notna() & (comparativa['gestor_responsable'] != '')]['gestor_responsable'].unique()
+        comp_con_gestor = comparativa[comparativa['gestor_responsable'].isin(gestores_responsables)]
+        comp_sin_gestor = len(comparativa) - len(comp_con_gestor)
+    
+        if comp_sin_gestor > 0:
+            st.markdown(
+                f"<p style='color:#656A71; font-size:0.8rem; margin-bottom:1rem'>📌 {len(comp_con_gestor):,} de {len(comparativa):,} estudiantes tenían gestor en la fecha anterior. Los resultados se atribuyen al gestor que los gestionó.</p>",
+                unsafe_allow_html=True
+            )
+    
+        # Construir scorecard por gestor
+        gestor_stats = []
+        for gestor in gestores_responsables:
+            comp_gestor = comparativa[comparativa['gestor_responsable'] == gestor]
+            if len(comp_gestor) == 0:
+                continue
+            n_total = len(comp_gestor)
+            n_mejor = len(comp_gestor[comp_gestor['cambio'] > 0])
+            n_empeor = len(comp_gestor[comp_gestor['cambio'] < 0])
+            n_estable = len(comp_gestor[comp_gestor['cambio'] == 0])
+            pct_mejor = n_mejor / n_total * 100
+            pct_empeor = n_empeor / n_total * 100
+            pct_estable = n_estable / n_total * 100
+            eficacia_neta = pct_mejor - pct_empeor  # Métrica clave
+    
+            gestor_stats.append({
+                'Gestor': gestor,
+                'Estudiantes': n_total,
+                'Mejoraron': n_mejor,
+                '% Mejoraron': round(pct_mejor, 1),
+                'Empeoraron': n_empeor,
+                '% Empeoraron': round(pct_empeor, 1),
+                'Estables': n_estable,
+                '% Estables': round(pct_estable, 1),
+                'Eficacia Neta': round(eficacia_neta, 1),
+            })
+    
+        if len(gestor_stats) > 0:
+            gestor_df = pd.DataFrame(gestor_stats).sort_values('Eficacia Neta', ascending=False)
+    
+            # ---- RANKING VISUAL ----
+            col_rank, col_score = st.columns([1, 1])
+    
+            with col_rank:
+                st.markdown("<div class='section-title'>Ranking de Eficacia</div>", unsafe_allow_html=True)
+                st.markdown(
+                    "<p style='color:#656A71; font-size:0.78rem; margin-top:-0.8rem; margin-bottom:1rem'>Eficacia neta = % mejoraron − % empeoraron</p>",
+                    unsafe_allow_html=True
+                )
+    
+                fig_rank = go.Figure()
+    
+                # Colores según eficacia neta
+                colors_rank = ['#149852' if v >= 0 else '#FD531E' for v in gestor_df['Eficacia Neta']]
+    
+                fig_rank.add_trace(go.Bar(
+                    y=gestor_df['Gestor'],
+                    x=gestor_df['Eficacia Neta'],
+                    orientation='h',
+                    marker=dict(color=colors_rank, line=dict(width=0)),
+                    text=[f"{v:+.1f}%" for v in gestor_df['Eficacia Neta']],
+                    textposition='outside',
+                    textfont=dict(color='white', size=12, family='Barlow Condensed'),
+                    hovertemplate="<b>%{y}</b><br>Eficacia neta: <b>%{x:.1f}%</b><extra></extra>",
+                ))
+    
+                fig_rank.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#C0C0C0", family="Barlow"),
+                    height=max(300, len(gestor_df) * 45),
+                    margin=dict(l=10, r=80, t=10, b=10),
+                    yaxis=dict(
+                        categoryorder='array',
+                        categoryarray=list(reversed(gestor_df['Gestor'].tolist())),
+                        tickfont=dict(color="#C0C0C0", family="Barlow", size=11),
+                        linecolor="#3A3A3A", gridcolor="rgba(0,0,0,0)",
+                    ),
+                    xaxis=dict(
+                        tickfont=dict(color="#C0C0C0", family="Barlow", size=10),
+                        linecolor="#3A3A3A", gridcolor="#2E2E2E",
+                        ticksuffix="%", zeroline=True, zerolinecolor="#656A71", zerolinewidth=1,
+                    ),
+                )
+                st.plotly_chart(fig_rank, use_container_width=True)
+    
+            with col_score:
+                st.markdown("<div class='section-title'>Scorecard por Gestor</div>", unsafe_allow_html=True)
+                st.dataframe(
+                    gestor_df[['Gestor', 'Estudiantes', 'Mejoraron', '% Mejoraron', 'Empeoraron', '% Empeoraron', 'Estables', 'Eficacia Neta']]
+                    .reset_index(drop=True),
+                    use_container_width=True,
+                    height=max(300, len(gestor_df) * 45),
+                )
+    
+            st.divider()
+    
+            # ---- DRILL-DOWN POR GESTOR ----
+            st.markdown("<div class='section-title'>Detalle por Gestor</div>", unsafe_allow_html=True)
+            gestor_sel = st.selectbox(
+                "Selecciona un gestor para ver sus estudiantes:",
+                gestor_df['Gestor'].tolist(),
+                label_visibility="visible"
+            )
+    
+            if gestor_sel:
+                det = comparativa[comparativa['gestor_responsable'] == gestor_sel].copy()
+                det['Estado'] = det['cambio'].apply(
+                    lambda x: '✅ Mejoró' if x > 0 else ('⚠️ Empeoró' if x < 0 else '➖ Estable')
+                )
+                det = det.sort_values('cambio', ascending=True)
+    
+                # Métricas del gestor seleccionado
+                g_data = gestor_df[gestor_df['Gestor'] == gestor_sel].iloc[0]
+                gc1, gc2, gc3, gc4 = st.columns(4)
+                gc1.metric("Estudiantes", int(g_data['Estudiantes']))
+                gc2.metric("✅ Mejoraron", int(g_data['Mejoraron']), f"{g_data['% Mejoraron']}%")
+                gc3.metric("⚠️ Empeoraron", int(g_data['Empeoraron']), f"-{g_data['% Empeoraron']}%", delta_color="inverse")
+                gc4.metric("Eficacia Neta", f"{g_data['Eficacia Neta']:+.1f}%",
+                           "positiva" if g_data['Eficacia Neta'] >= 0 else "negativa",
+                           delta_color="normal" if g_data['Eficacia Neta'] >= 0 else "inverse")
+    
+                st.dataframe(
+                    det[['user_incremental', 'user_full_name', 'gravedad_viejo', 'gravedad_nuevo', 'cambio', 'Estado']]
+                    .reset_index(drop=True)
+                    .rename(columns={
+                        'user_incremental': 'ID',
+                        'user_full_name':   'Estudiante',
+                        'gravedad_viejo':   'Gravedad Anterior',
+                        'gravedad_nuevo':   'Gravedad Actual',
+                        'cambio':           'Cambio',
+                    }),
+                    use_container_width=True, height=400
+                )
+        else:
+            st.info("No hay gestores con datos comparativos disponibles.")
+    
+    else:
+        # ---- MODO FECHA ÚNICA: Distribución por gestor ----
+        st.markdown(
+            "<p style='color:#656A71; font-size:0.85rem; margin-bottom:1rem'>Selecciona una fecha de comparación para ver el ranking de eficacia y scorecard detallado.</p>",
+            unsafe_allow_html=True
+        )
+    
+        if len(gestores_validos) > 0:
+            gestor_alert_data = df_principal[df_principal['gestor_asignado'].isin(gestores_validos)] \
+                .groupby(['gestor_asignado', 'alert_type']).size().reset_index(name='count')
+    
+            tipos_gestor = [a for a in ALERT_ORDER if a in gestor_alert_data['alert_type'].unique()]
+    
+            orden_gestor = (
+                df_principal[df_principal['gravedad'] >= 3]
+                .groupby('gestor_asignado')['user_id'].count()
+                .sort_values(ascending=True).index.tolist()
+            )
+            for g in gestores_validos:
+                if g not in orden_gestor:
+                    orden_gestor.insert(0, g)
+    
+            fig_gestor = go.Figure()
+            for alert in tipos_gestor:
+                subset = gestor_alert_data[gestor_alert_data['alert_type'] == alert]
+                fig_gestor.add_trace(go.Bar(
+                    name=alert,
+                    y=subset['gestor_asignado'],
+                    x=subset['count'],
+                    orientation='h',
+                    marker=dict(color=ALERT_COLORS.get(alert, "#FD531E"), line=dict(width=0)),
+                    text=subset['count'],
+                    textposition='inside',
+                    insidetextanchor='middle',
+                    textfont=dict(color='white', size=12, family='Barlow'),
+                    hovertemplate=f"<b>{alert}</b><br>%{{y}}<br><b>%{{x}}</b> estudiantes<extra></extra>",
+                ))
+    
+            fig_gestor.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#C0C0C0", family="Barlow"),
+                barmode='stack',
+                height=max(350, len(gestores_validos) * 50),
+                margin=dict(l=10, r=20, t=60, b=20),
+                yaxis=dict(**AXIS, categoryorder='array', categoryarray=orden_gestor),
+                xaxis=dict(**AXIS, title=dict(text="Número de estudiantes", font=dict(color="#656A71", size=12))),
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=11, color="#C0C0C0"), traceorder="normal"
+                ),
+            )
+            st.plotly_chart(fig_gestor, use_container_width=True)
+        else:
+            st.info("No hay gestores asignados en los datos de esta fecha.")
+
+with tab1:
+    render_asistencia()
+
+with tab2:
+    render_reprobacion()
+
+with tab3:
+    render_riesgo360()

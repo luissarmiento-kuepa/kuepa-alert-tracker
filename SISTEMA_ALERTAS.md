@@ -166,7 +166,10 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
 - [x] Pestaña 📉 Asistencia (`render_asistencia`): métricas + barras por programa + tabla + panel docentes.
 - [x] Pestaña 📕 Reprobación (`render_reprobacion`): métricas + barras + tabla por estudiante.
 - [x] Pestaña 🎯 Riesgo 360 (`render_riesgo360`): 4 señales + tabla Riesgo Múltiple.
-- [ ] **Pendiente de probar en vivo** (requiere credenciales + las 3 pestañas pobladas).
+- [x] Probado en vivo (carga datos; usa snapshot más cercano con `_snapshot_fecha` si hay drift de fechas).
+- [x] Pulido v1: pestañas con estilo Kuepa (píldoras), gráfico de **combinaciones de riesgo** en 360,
+  Reprobación por nº de estudiantes afectados, y caption de solapamiento (`_overlap_caption`) que liga
+  cada pestaña a Riesgo 360.
 - [ ] Comparativos/eficacia week-over-week en las pestañas nuevas (v1 muestra fecha actual).
 
 Notas de implementación: el bloque de contenido original quedó indentado +4 dentro de

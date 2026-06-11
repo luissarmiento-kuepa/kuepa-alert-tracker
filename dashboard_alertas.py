@@ -221,6 +221,46 @@ st.markdown("""
         padding-left: 10px;
         margin-bottom: 1rem;
     }
+
+    /* ---- PESTAÑAS (TABS) ---- */
+    [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: #232323;
+        border: 1px solid #3A3A3A;
+        border-radius: 12px;
+        padding: 8px;
+        margin-bottom: 1.2rem;
+    }
+    button[data-baseweb="tab"] {
+        height: 52px;
+        background-color: transparent !important;
+        border-radius: 9px;
+        padding: 0 26px !important;
+        margin: 0 !important;
+    }
+    button[data-baseweb="tab"] [data-testid="stMarkdownContainer"] p,
+    button[data-baseweb="tab"] p {
+        font-family: 'Barlow Condensed', sans-serif !important;
+        font-weight: 700 !important;
+        font-size: 1.25rem !important;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #9A9A9A !important;
+        margin: 0 !important;
+    }
+    button[data-baseweb="tab"]:hover {
+        background-color: #2E2E2E !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        background-color: #FD531E !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] p {
+        color: #FFFFFF !important;
+    }
+    [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] {
+        background-color: transparent !important;
+        height: 0 !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -465,6 +505,23 @@ def _snapshot_fecha(df, target):
     previos = [f for f in fechas if f <= target]
     return max(previos) if previos else min(fechas)
 
+def _overlap_caption(serie_ids):
+    """Cuántos de esos estudiantes también disparan alerta de login (grave) o mora."""
+    ids = set(serie_ids.astype(str))
+    if not ids:
+        return
+    bl = df_principal.drop_duplicates('user_incremental')
+    riesgo_ids = set(bl[(bl['gravedad'] >= 3) |
+                        (bl['financial_status_name'].isin(['Mora avanzada', 'Baja por mora']))]
+                     ['user_incremental'].astype(str))
+    n = len(ids & riesgo_ids)
+    if n > 0:
+        st.markdown(
+            f"<p style='color:#FD531E; font-size:0.88rem; font-weight:600; margin-top:0.2rem'>"
+            f"🔗 {n} de estos estudiantes también tienen alerta de login o mora → revísalos en "
+            f"<b>🎯 Riesgo 360</b></p>",
+            unsafe_allow_html=True)
+
 # ============================================================
 # PESTAÑA: ASISTENCIA
 # ============================================================
@@ -491,6 +548,7 @@ def render_asistencia():
     c2.metric("🔴 Asistencia crítica", criticos)
     c3.metric("🟡 En alerta", en_alerta)
     c4.metric("📊 % asistencia prom.", f"{prom:.1f}%" if pd.notna(prom) else "—")
+    _overlap_caption(d['user_incremental'])
     st.divider()
 
     st.markdown("<div class='section-title'>Asistencia por Programa — Nivel de alerta</div>", unsafe_allow_html=True)
@@ -574,15 +632,16 @@ def render_reprobacion():
     c2.metric("📕 Con ≥1 reprobada", con_rep, f"{con_rep / total * 100:.1f}%" if total else "0%", delta_color="inverse")
     c3.metric("📚 Módulos reprobados", tot_rep)
     c4.metric("📊 Nota promedio", f"{prom:.2f}" if pd.notna(prom) else "—")
+    _overlap_caption(d[d['modulos_reprobados'] > 0]['user_incremental'])
     st.divider()
 
-    st.markdown("<div class='section-title'>Módulos Reprobados por Programa</div>", unsafe_allow_html=True)
-    bar = (d.groupby('program_name')['modulos_reprobados'].sum().reset_index()
-           .sort_values('modulos_reprobados'))
+    st.markdown("<div class='section-title'>Estudiantes con Reprobaciones por Programa</div>", unsafe_allow_html=True)
+    bar = (d[d['modulos_reprobados'] > 0].groupby('program_name')['user_incremental']
+           .nunique().reset_index(name='estudiantes').sort_values('estudiantes'))
     fig = go.Figure(go.Bar(
-        y=bar['program_name'], x=bar['modulos_reprobados'], orientation='h',
+        y=bar['program_name'], x=bar['estudiantes'], orientation='h',
         marker=dict(color="#C0392B", line=dict(width=0)),
-        text=bar['modulos_reprobados'], textposition='inside', insidetextanchor='middle',
+        text=bar['estudiantes'], textposition='inside', insidetextanchor='middle',
         textfont=dict(color='white', size=12, family='Barlow'),
     ))
     fig.update_layout(
@@ -644,7 +703,6 @@ def render_riesgo360():
     c4.metric("📕 Con reprobaciones",    int(base['sig_reprob'].sum()))
     st.divider()
 
-    st.markdown("<div class='section-title' style='border-color:#C0392B'>🚨 Estudiantes en Riesgo Múltiple — 2+ señales simultáneas</div>", unsafe_allow_html=True)
     multi = base[base['num_senales'] >= 2].copy()
     if len(multi) == 0:
         st.success("✅ No hay estudiantes con 2 o más señales de riesgo en esta fecha.")
@@ -656,9 +714,33 @@ def render_riesgo360():
         if r['sig_mora']:   partes.append('💳 Mora')
         if r['sig_asis']:   partes.append('📉 Asistencia')
         if r['sig_reprob']: partes.append('📕 Reprobación')
-        return '  ·  '.join(partes)
+        return '  +  '.join(partes)
 
     multi['Señales'] = multi.apply(_senales, axis=1)
+
+    # ---- Gráfico: combinaciones de riesgo más frecuentes ----
+    st.markdown("<div class='section-title' style='border-color:#C0392B'>Combinaciones de Riesgo más Frecuentes</div>", unsafe_allow_html=True)
+    combo = (multi.groupby('Señales')
+             .agg(estudiantes=('Señales', 'size'), n=('num_senales', 'max'))
+             .reset_index().sort_values('estudiantes'))
+    combo_colors = combo['n'].map({2: '#F5A623', 3: '#FD531E', 4: '#7B0000'}).fillna('#FD531E')
+    fig_combo = go.Figure(go.Bar(
+        y=combo['Señales'], x=combo['estudiantes'], orientation='h',
+        marker=dict(color=combo_colors, line=dict(width=0)),
+        text=combo['estudiantes'], textposition='outside',
+        textfont=dict(color='#FAFAFA', size=13, family='Barlow'),
+        hovertemplate="<b>%{y}</b><br>%{x} estudiantes<extra></extra>",
+    ))
+    fig_combo.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#C0C0C0", family="Barlow"),
+        height=max(280, len(combo) * 46), margin=dict(l=10, r=40, t=20, b=20),
+        xaxis=dict(**AXIS), yaxis=dict(**AXIS),
+    )
+    st.plotly_chart(fig_combo, use_container_width=True)
+    st.divider()
+
+    st.markdown("<div class='section-title' style='border-color:#C0392B'>🚨 Estudiantes en Riesgo Múltiple — 2+ señales simultáneas</div>", unsafe_allow_html=True)
     show = (multi.sort_values('num_senales', ascending=False)
             [['user_incremental', 'user_full_name', 'gestor_asignado', 'Señales', 'num_senales']]
             .reset_index(drop=True).rename(columns={

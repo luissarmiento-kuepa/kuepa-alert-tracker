@@ -753,9 +753,14 @@ def render_riesgo360():
 # ============================================================
 # NAVEGACIÓN POR PESTAÑAS
 # ============================================================
-tab0, tab1, tab2, tab3 = st.tabs(["🔌 Conexión", "📉 Asistencia", "📕 Reprobación", "🎯 Riesgo 360"])
+tab_360, tab_conexion, tab_asis, tab_reprob = st.tabs(
+    ["🎯 Riesgo 360", "🔌 Conexión", "📉 Asistencia", "📕 Reprobación"]
+)
 
-with tab0:
+with tab_360:
+    render_riesgo360()
+
+with tab_conexion:
     # ============================================================
     # MÉTRICAS
     # ============================================================
@@ -1351,11 +1356,8 @@ with tab0:
         else:
             st.info("No hay gestores asignados en los datos de esta fecha.")
 
-with tab1:
+with tab_asis:
     render_asistencia()
 
-with tab2:
+with tab_reprob:
     render_reprobacion()
-
-with tab3:
-    render_riesgo360()

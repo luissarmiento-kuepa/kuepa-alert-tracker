@@ -140,7 +140,7 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
 | 🔌 **Conexión**    | El dashboard actual, idéntico (login + financiero). |
 | 📉 **Asistencia**  | Métricas (% global, 🔴 crítico, 🟡 alerta) · barras por programa · tabla estudiante×materia · **panel aparte** "Sesiones sin registrar (docentes)". |
 | 📕 **Reprobación** | Desempeño académico histórico por estudiante: métricas (alumnos con ≥1 reprobada, total módulos reprobados, nota promedio) · barras por programa · tabla por estudiante (cursados / aprobados / reprobados). |
-| 🎯 **Riesgo 360**  | Score integral de 4 señales (login + mora + ausentismo + reprobación) + tabla **"Riesgo Múltiple"** (estudiantes con 2+ alertas). Evolución de la tabla "Doble Riesgo" actual. |
+| 🎯 **Riesgo 360**  | **Pestaña principal (default).** Gráfico de **combinaciones de riesgo más frecuentes** + métricas de señales + tabla **"Riesgo Múltiple"** (estudiantes con 2+ alertas: login + mora + ausentismo + reprobación). Es el centro del sistema: ver quiénes combinan alertas, no alertas sueltas. |
 
 ---
 

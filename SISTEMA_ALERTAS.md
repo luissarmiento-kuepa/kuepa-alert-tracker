@@ -138,7 +138,7 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
 | Pestaña            | Contenido |
 |--------------------|-----------|
 | 🔌 **Conexión**    | El dashboard actual, idéntico (login + financiero). |
-| 📉 **Asistencia**  | Métricas (% global, 🔴 crítico, 🟡 alerta) · barras por programa · tabla estudiante×materia · **panel aparte** "Sesiones sin registrar (docentes)". |
+| 📉 **Ausentismo**  | (la pestaña se llama "Ausentismo"; el feed/Sheet sigue siendo "Asistencia"). Semáforo de tarjetas (🔴 crítico <50% / 🟡 alerta 50–70% / 🟠 bajo 70–85%) + dona de distribución + ranking "dónde priorizar" por programa + tabla "estudiantes a contactar" + **panel aparte** "Sesiones sin registrar (docentes)". Severidad por estudiante = su peor materia. |
 | 📕 **Reprobación** | Desempeño académico histórico por estudiante: métricas (alumnos con ≥1 reprobada, total módulos reprobados, nota promedio) · barras por programa · tabla por estudiante (cursados / aprobados / reprobados). |
 | 🎯 **Riesgo 360**  | **Pestaña principal (default).** Gráfico de **combinaciones de riesgo más frecuentes** + métricas de señales + tabla **"Riesgo Múltiple"** (estudiantes con 2+ alertas: login + mora + ausentismo + reprobación). Es el centro del sistema: ver quiénes combinan alertas, no alertas sueltas. |
 

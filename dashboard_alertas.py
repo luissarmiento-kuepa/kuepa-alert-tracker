@@ -523,59 +523,98 @@ def _overlap_caption(serie_ids):
             unsafe_allow_html=True)
 
 # ============================================================
-# PESTAÑA: ASISTENCIA
+# PESTAÑA: AUSENTISMO
 # ============================================================
-def render_asistencia():
+SEV_RANK = {'🔴 CRÍTICO': 3, '🟡 ALERTA': 2, '🟠 BAJO': 1, '🟢 NORMAL': 0}
+
+def render_ausentismo():
     if df_asis_all.empty:
-        st.info("Aún no hay datos de asistencia. Verifica que la pestaña 'Asistencia' del Sheet esté poblada.")
+        st.info("Aún no hay datos de ausentismo. Verifica que la pestaña 'Asistencia' del Sheet esté poblada.")
         return
     f_asis = _snapshot_fecha(df_asis_all, fecha_principal)
     d = df_asis_all[df_asis_all['fecha_informe'] == f_asis].copy()
     if programas:
         d = d[d['PROGRAMA'].isin(programas)]
     if len(d) == 0:
-        st.warning("No hay datos de asistencia para los filtros seleccionados.")
+        st.warning("No hay datos de ausentismo para los filtros seleccionados.")
         return
     if f_asis != fecha_principal:
-        st.caption(f"📅 Snapshot de asistencia más cercano: {f_asis} (no hay corrida del {fecha_principal})")
+        st.caption(f"📅 Snapshot de ausentismo más cercano: {f_asis} (no hay corrida del {fecha_principal})")
 
-    est      = d['user_incremental'].nunique()
-    criticos = d[d['NIVEL_ALERTA'] == '🔴 CRÍTICO']['user_incremental'].nunique()
-    en_alerta = d[d['NIVEL_ALERTA'] == '🟡 ALERTA']['user_incremental'].nunique()
-    prom     = d['PORCENTAJE_ASISTENCIA'].mean()
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("👥 Estudiantes con alerta", est)
-    c2.metric("🔴 Asistencia crítica", criticos)
-    c3.metric("🟡 En alerta", en_alerta)
-    c4.metric("📊 % asistencia prom.", f"{prom:.1f}%" if pd.notna(prom) else "—")
-    _overlap_caption(d['user_incremental'])
+    # Nivel más severo por estudiante (un alumno puede tener varias materias)
+    d['_sev'] = d['NIVEL_ALERTA'].map(SEV_RANK).fillna(0)
+    peor = d.sort_values('_sev', ascending=False).drop_duplicates('user_incremental')
+    cnt  = peor['NIVEL_ALERTA'].value_counts()
+    n_crit = int(cnt.get('🔴 CRÍTICO', 0))
+    n_aler = int(cnt.get('🟡 ALERTA', 0))
+    n_bajo = int(cnt.get('🟠 BAJO', 0))
+    total  = peor['user_incremental'].nunique()
+    prom   = d['PORCENTAJE_ASISTENCIA'].mean()
+
+    # ---- SEMÁFORO (tarjetas) ----
+    cards = [
+        ('🔴', 'CRÍTICO', str(n_crit), ASIS_COLORS['🔴 CRÍTICO'], 'Asistencia &lt; 50%'),
+        ('🟡', 'ALERTA',  str(n_aler), ASIS_COLORS['🟡 ALERTA'],  'Asistencia 50–70%'),
+        ('🟠', 'BAJO',    str(n_bajo), ASIS_COLORS['🟠 BAJO'],    'Asistencia 70–85%'),
+        ('📊', 'PROMEDIO', f"{prom:.0f}%" if pd.notna(prom) else '—', '#656A71', f'{total} estudiantes'),
+    ]
+    for col, (emoji, label, val, color, sub) in zip(st.columns(4), cards):
+        col.markdown(
+            f"<div style='background:#232323;border:1px solid #3A3A3A;border-top:4px solid {color};"
+            f"border-radius:10px;padding:14px 10px;text-align:center'>"
+            f"<div style='font-size:1.5rem'>{emoji}</div>"
+            f"<div style='font-family:Barlow Condensed,sans-serif;font-weight:800;font-size:2.4rem;color:{color};line-height:1.1'>{val}</div>"
+            f"<div style='color:#C0C0C0;font-size:0.78rem;text-transform:uppercase;letter-spacing:0.08em;font-weight:700'>{label}</div>"
+            f"<div style='color:#656A71;font-size:0.72rem;margin-top:2px'>{sub}</div></div>",
+            unsafe_allow_html=True)
+    _overlap_caption(peor['user_incremental'])
     st.divider()
 
-    st.markdown("<div class='section-title'>Asistencia por Programa — Nivel de alerta</div>", unsafe_allow_html=True)
-    bar = d.groupby(['PROGRAMA', 'NIVEL_ALERTA']).size().reset_index(name='count')
-    fig = go.Figure()
-    for niv in ASIS_ORDER:
-        sub = bar[bar['NIVEL_ALERTA'] == niv]
-        if sub.empty:
-            continue
-        fig.add_trace(go.Bar(
-            name=niv, y=sub['PROGRAMA'], x=sub['count'], orientation='h',
-            marker=dict(color=ASIS_COLORS.get(niv, '#FD531E'), line=dict(width=0)),
-            text=sub['count'], textposition='inside', insidetextanchor='middle',
-            textfont=dict(color='white', size=12, family='Barlow'),
+    # ---- Dona (distribución por nivel) + Prioridad por programa ----
+    g1, g2 = st.columns([1, 1.4])
+    with g1:
+        st.markdown("<div class='section-title'>Semáforo de ausentismo</div>", unsafe_allow_html=True)
+        order = ['🔴 CRÍTICO', '🟡 ALERTA', '🟠 BAJO']
+        fig_d = go.Figure(go.Pie(
+            labels=order, values=[n_crit, n_aler, n_bajo], hole=0.62, sort=False, direction='clockwise',
+            marker=dict(colors=[ASIS_COLORS[k] for k in order], line=dict(color='#1A1A1A', width=2)),
+            textinfo='value', textfont=dict(color='white', size=14, family='Barlow'),
+            hovertemplate="<b>%{label}</b><br>%{value} estudiantes (%{percent})<extra></extra>",
         ))
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#C0C0C0", family="Barlow"), barmode='stack',
-        height=max(380, d['PROGRAMA'].nunique() * 50), margin=dict(l=10, r=20, t=50, b=20),
-        xaxis=dict(**AXIS), yaxis=dict(**AXIS),
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
-                    bgcolor="rgba(0,0,0,0)", font=dict(size=11, color="#C0C0C0")),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        fig_d.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#C0C0C0", family="Barlow"), height=330,
+            margin=dict(l=10, r=10, t=10, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.18, x=0, font=dict(size=11, color="#C0C0C0")),
+            annotations=[dict(text=f"<b>{n_crit + n_aler + n_bajo}</b><br>en riesgo", x=0.5, y=0.5,
+                              font=dict(size=17, color="#FAFAFA", family="Barlow Condensed"), showarrow=False)],
+        )
+        st.plotly_chart(fig_d, use_container_width=True)
+    with g2:
+        st.markdown("<div class='section-title'>Dónde priorizar — Programas con más estudiantes en riesgo</div>", unsafe_allow_html=True)
+        prio = (peor[peor['_sev'] >= 2].groupby('PROGRAMA')['user_incremental']
+                .nunique().reset_index(name='en_riesgo').sort_values('en_riesgo'))
+        if len(prio) > 0:
+            fig_p = go.Figure(go.Bar(
+                y=prio['PROGRAMA'], x=prio['en_riesgo'], orientation='h',
+                marker=dict(color=prio['en_riesgo'],
+                            colorscale=[[0, '#F5A623'], [0.5, '#FD531E'], [1, '#C0392B']], line=dict(width=0)),
+                text=prio['en_riesgo'], textposition='outside',
+                textfont=dict(color='#FAFAFA', size=13, family='Barlow'),
+                hovertemplate="<b>%{y}</b><br>%{x} estudiantes en crítico/alerta<extra></extra>",
+            ))
+            fig_p.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#C0C0C0", family="Barlow"),
+                height=max(330, len(prio) * 42), margin=dict(l=10, r=44, t=10, b=10),
+                xaxis=dict(**AXIS), yaxis=dict(**AXIS),
+            )
+            st.plotly_chart(fig_p, use_container_width=True)
+        else:
+            st.success("✅ Ningún programa con estudiantes en nivel crítico o alerta.")
     st.divider()
 
-    st.markdown("<div class='section-title'>Detalle por Estudiante y Asignatura</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Estudiantes a contactar — peor asistencia primero</div>", unsafe_allow_html=True)
     cols_t = ['user_incremental', 'NOMBRE_ESTUDIANTE', 'PROGRAMA', 'ASIGNATURA',
               'PORCENTAJE_ASISTENCIA', 'SESIONES_NO_ASISTIO', 'NIVEL_ALERTA']
     cols_t = [c for c in cols_t if c in d.columns]
@@ -699,7 +738,7 @@ def render_riesgo360():
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("🎯 Riesgo múltiple (2+)", int((base['num_senales'] >= 2).sum()))
     c2.metric("🚨 3+ señales",          int((base['num_senales'] >= 3).sum()))
-    c3.metric("📉 Asistencia baja",      int(base['sig_asis'].sum()))
+    c3.metric("📉 Ausentismo",           int(base['sig_asis'].sum()))
     c4.metric("📕 Con reprobaciones",    int(base['sig_reprob'].sum()))
     st.divider()
 
@@ -712,7 +751,7 @@ def render_riesgo360():
         partes = []
         if r['sig_login']:  partes.append('🔌 Login')
         if r['sig_mora']:   partes.append('💳 Mora')
-        if r['sig_asis']:   partes.append('📉 Asistencia')
+        if r['sig_asis']:   partes.append('📉 Ausentismo')
         if r['sig_reprob']: partes.append('📕 Reprobación')
         return '  +  '.join(partes)
 
@@ -754,7 +793,7 @@ def render_riesgo360():
 # NAVEGACIÓN POR PESTAÑAS
 # ============================================================
 tab_360, tab_conexion, tab_asis, tab_reprob = st.tabs(
-    ["🎯 Riesgo 360", "🔌 Conexión", "📉 Asistencia", "📕 Reprobación"]
+    ["🎯 Riesgo 360", "🔌 Conexión", "📉 Ausentismo", "📕 Reprobación"]
 )
 
 with tab_360:
@@ -1357,7 +1396,7 @@ with tab_conexion:
             st.info("No hay gestores asignados en los datos de esta fecha.")
 
 with tab_asis:
-    render_asistencia()
+    render_ausentismo()
 
 with tab_reprob:
     render_reprobacion()

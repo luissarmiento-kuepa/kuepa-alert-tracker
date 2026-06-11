@@ -454,6 +454,17 @@ df_notas_all = load_notas()
 ASIS_ORDER  = ['🔴 CRÍTICO', '🟡 ALERTA', '🟠 BAJO', '🟢 NORMAL']
 ASIS_COLORS = {'🔴 CRÍTICO': '#C0392B', '🟡 ALERTA': '#FD531E', '🟠 BAJO': '#F5A623', '🟢 NORMAL': '#149852'}
 
+def _snapshot_fecha(df, target):
+    """Devuelve el snapshot disponible más cercano a 'target' (el <= más reciente,
+    o el más antiguo si no hay anteriores). Tolera desfases de fecha entre fuentes."""
+    if df.empty or 'fecha_informe' not in df.columns:
+        return None
+    fechas = sorted(df['fecha_informe'].dropna().unique())
+    if not fechas:
+        return None
+    previos = [f for f in fechas if f <= target]
+    return max(previos) if previos else min(fechas)
+
 # ============================================================
 # PESTAÑA: ASISTENCIA
 # ============================================================
@@ -461,12 +472,15 @@ def render_asistencia():
     if df_asis_all.empty:
         st.info("Aún no hay datos de asistencia. Verifica que la pestaña 'Asistencia' del Sheet esté poblada.")
         return
-    d = df_asis_all[df_asis_all['fecha_informe'] == fecha_principal].copy()
+    f_asis = _snapshot_fecha(df_asis_all, fecha_principal)
+    d = df_asis_all[df_asis_all['fecha_informe'] == f_asis].copy()
     if programas:
         d = d[d['PROGRAMA'].isin(programas)]
     if len(d) == 0:
         st.warning("No hay datos de asistencia para los filtros seleccionados.")
         return
+    if f_asis != fecha_principal:
+        st.caption(f"📅 Snapshot de asistencia más cercano: {f_asis} (no hay corrida del {fecha_principal})")
 
     est      = d['user_incremental'].nunique()
     criticos = d[d['NIVEL_ALERTA'] == '🔴 CRÍTICO']['user_incremental'].nunique()
@@ -541,12 +555,15 @@ def render_reprobacion():
     if df_notas_all.empty:
         st.info("Aún no hay datos de notas. Verifica que la pestaña 'Notas' del Sheet esté poblada.")
         return
-    d = df_notas_all[df_notas_all['fecha_informe'] == fecha_principal].copy()
+    f_notas = _snapshot_fecha(df_notas_all, fecha_principal)
+    d = df_notas_all[df_notas_all['fecha_informe'] == f_notas].copy()
     if programas:
         d = d[d['program_name'].isin(programas)]
     if len(d) == 0:
         st.warning("No hay datos de notas para los filtros seleccionados.")
         return
+    if f_notas != fecha_principal:
+        st.caption(f"📅 Snapshot de notas más cercano: {f_notas} (no hay corrida del {fecha_principal})")
 
     total   = d['user_incremental'].nunique()
     con_rep = d[d['modulos_reprobados'] > 0]['user_incremental'].nunique()
@@ -604,14 +621,14 @@ def render_riesgo360():
 
     base['sig_asis'] = False
     if not df_asis_all.empty:
-        da = df_asis_all[df_asis_all['fecha_informe'] == fecha_principal].copy()
+        da = df_asis_all[df_asis_all['fecha_informe'] == _snapshot_fecha(df_asis_all, fecha_principal)].copy()
         da['user_incremental'] = da['user_incremental'].astype(str)
         worst = da.groupby('user_incremental')['PORCENTAJE_ASISTENCIA'].min()
         base['sig_asis'] = base['user_incremental'].map(worst < 70).fillna(False)
 
     base['sig_reprob'] = False
     if not df_notas_all.empty:
-        dn = df_notas_all[df_notas_all['fecha_informe'] == fecha_principal].drop_duplicates('user_incremental').copy()
+        dn = df_notas_all[df_notas_all['fecha_informe'] == _snapshot_fecha(df_notas_all, fecha_principal)].drop_duplicates('user_incremental').copy()
         dn['user_incremental'] = dn['user_incremental'].astype(str)
         repmap = dn.set_index('user_incremental')['modulos_reprobados'] > 0
         base['sig_reprob'] = base['user_incremental'].map(repmap).fillna(False)

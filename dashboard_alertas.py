@@ -438,7 +438,15 @@ def _get_worksheet_df(sheet_name):
     except Exception:
         gc = gspread.service_account(filename=str(CREDENTIALS_FILE))
     sh = gc.open_by_key(SHEET_ID)
-    ws = sh.worksheet(sheet_name)
+    try:
+        ws = sh.worksheet(sheet_name)
+    except Exception:
+        # Tolerar diferencias de mayúsculas/espacios en el nombre de la pestaña
+        # (p. ej. la pestaña se llama "MATERIAS" y aquí pedimos "Materias").
+        target = sheet_name.strip().lower()
+        ws = next((w for w in sh.worksheets() if w.title.strip().lower() == target), None)
+        if ws is None:
+            return pd.DataFrame()
     vals = ws.get_all_values()
     if not vals:
         return pd.DataFrame()

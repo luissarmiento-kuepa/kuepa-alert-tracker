@@ -5,15 +5,18 @@
 --
 -- Complementa a "Notas" (resumen por estudiante). Aquí la pregunta es
 -- distinta: NO "cuántos módulos reprobó cada alumno", sino "QUÉ materias
--- son las que más se reprueban" → permite acción curricular/pedagógica,
--- no solo gestión 1-a-1. El dashboard suma estos conteos para el ranking.
+-- son las que más se reprueban" → permite acción curricular/pedagógica.
 --
--- Mantener el grano por programa (no solo por materia) permite que el
--- filtro de programas del dashboard siga funcionando: el front re-agrega.
+-- Misma lógica corregida que notas_reprobacion.sql (validada con 29649):
+--   1) PROGRAMA VIGENTE: nota ↔ programa por EKU100400.STRUCTURE_ID = program_id;
+--      solo materias cuyo STRUCTURE_ID = programa vigente del estudiante.
+--   2) CURSADO: FINAL_NOTE_VALUE (STRING) > 0  (los "0" = no iniciado se excluyen);
+--      value >= 3.0 => aprobado ; 0 < value < 3.0 => reprobado.
+-- Mantener el grano por programa permite que el filtro de programas del
+-- dashboard siga funcionando: el front re-agrega por materia.
 -- ============================================================
 
 WITH estudiantes_activos AS (
-  -- Misma base y mismo abanico de "activo" que notas_reprobacion.sql (coherencia 360)
   SELECT
     user_id,
     user_incremental,
@@ -39,36 +42,32 @@ WITH estudiantes_activos AS (
   QUALIFY ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY program_id) = 1
 ),
 
-notas_historicas AS (
-  -- Solo notas finales publicadas
+notas_cursadas AS (
   SELECT
-    E100400.USER_ID AS user_id,
-    E100415.name AS subject_name,
-    SAFE_CAST(E100401.FINAL_NOTE_VALUE AS FLOAT64) AS value,
-    E100401.FINAL_NOTE_APPROVE AS approved
-  FROM `potent-poetry-284019.DSKU_SIS.EKU100401_subjects` AS E100401
-  INNER JOIN `potent-poetry-284019.DSKU_SIS.EKU100400_centralize_final_note` AS E100400
-    ON E100401.__CENTRALIZEFINALNOTES = E100400._ID
-  LEFT JOIN `potent-poetry-284019.DSKU_SIS.EKU100415_subject` AS E100415
-    ON E100415._ID = E100401.SUBJECT_ID
-  WHERE E100401.FINAL_NOTE_VALUE IS NOT NULL
+    cn.USER_ID                                   AS user_id,
+    cn.STRUCTURE_ID                              AS program_id_nota,
+    cat.NAME                                     AS subject_name,
+    SAFE_CAST(s.FINAL_NOTE_VALUE AS FLOAT64)     AS value
+  FROM `potent-poetry-284019.DSKU_SIS.EKU100401_subjects` AS s
+  INNER JOIN `potent-poetry-284019.DSKU_SIS.EKU100400_centralize_final_note` AS cn
+    ON s.__CENTRALIZEFINALNOTES = cn._ID
+  LEFT JOIN `potent-poetry-284019.DSKU_SIS.EKU100415_subject` AS cat
+    ON cat._ID = s.SUBJECT_ID
+  WHERE SAFE_CAST(s.FINAL_NOTE_VALUE AS FLOAT64) > 0
 ),
 
--- Estado actual por estudiante × materia (colapsa recuperaciones igual que en Notas:
--- si EXISTE alguna nota aprobatoria => la materia está aprobada/recuperada).
 desempeno_materia AS (
   SELECT
-    n.user_id,
-    n.subject_name,
-    MAX(CASE WHEN LOWER(TRIM(CAST(n.approved AS STRING))) IN
-              ('true','1','yes','si','sí','aprobado','approved')
-             THEN 1 ELSE 0 END) AS materia_aprobada,
-    MAX(n.value) AS nota_materia
-  FROM notas_historicas AS n
-  GROUP BY n.user_id, n.subject_name
+    user_id,
+    program_id_nota,
+    subject_name,
+    MAX(CASE WHEN value >= 3.0 THEN 1 ELSE 0 END) AS materia_aprobada,
+    MAX(value)                                    AS nota_materia
+  FROM notas_cursadas
+  GROUP BY user_id, program_id_nota, subject_name
 )
 
--- RESULTADO: una fila por programa × materia
+-- RESULTADO: 1 fila por programa × materia (solo materias del programa vigente del alumno)
 SELECT
   CASE
     WHEN ea.program_name LIKE '%Bachillerato%' THEN 'Bachillerato'
@@ -90,6 +89,7 @@ SELECT
 FROM estudiantes_activos AS ea
 INNER JOIN desempeno_materia AS dm
   ON ea.user_id = dm.user_id
+  AND ea.program_id = dm.program_id_nota   -- 🔑 solo materias del programa vigente
 WHERE dm.subject_name IS NOT NULL
 GROUP BY
   modalidad,

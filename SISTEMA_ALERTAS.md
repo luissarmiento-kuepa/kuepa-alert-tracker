@@ -117,18 +117,30 @@ Datasets `DVKU_SIS` (estudiantes/estado) + `DSKU_SIS` (notas). Salida (1 fila po
 `nota_promedio`, `fecha_informe`, `clave_registro` (= `estudiante|fecha`, llave única n8n).
 - **Grano:** 1 fila por **estudiante** = resumen **histórico** de su desempeño (NO por materia).
   Se eligió resumen (no detalle por materia) para no inflar el Sheet con snapshots semanales.
-- **"Cursado"** = materia con nota final publicada (`FINAL_NOTE_VALUE IS NOT NULL`);
-  **"Reprobado"** = nota final no aprobada. **Histórico total** (sin filtro de fecha).
+- **🔑 Programa vigente (corregido 2026-06-12):** la nota se amarra al programa por
+  `EKU100400.STRUCTURE_ID`, que **es el `program_id`** (validado con el alumno trasladado
+  29649). El JOIN final exige `ea.program_id = STRUCTURE_ID`, así que **solo cuentan las
+  materias del programa vigente** — antes el JOIN era solo por `user_id` e inflaba con módulos
+  del programa del que fue trasladado. (El catálogo `EKU100415.INTEGRATION_PROGRAM_ID` viene NULL.)
+- **🔑 "Cursado" vs "no cursado" (corregido 2026-06-12):** `FINAL_NOTE_VALUE` es STRING.
+  `value > 0` = **cursado** (tiene nota real); `value ≤ 0` o NULL (en la data el placeholder de
+  "no iniciado" es `"0"`, no NULL) = **no cursado → se excluye**. Antes se contaba todo lo que
+  tuviera nota, así que los módulos en `"0"` (no iniciados) inflaban `modulos_reprobados`.
+- **"Aprobado" por umbral:** `value ≥ 3.0` = aprobado; `0 < value < 3.0` = reprobado. Se usa el
+  **umbral 3.0**, no `FINAL_NOTE_APPROVE`. Limitación aceptada: un 0 "real" (entregó y sacó 0)
+  se trata como no cursado, porque en Kuepa el 0 es el placeholder de "no iniciado".
 - **"Activo":** se define con `academic_status_name` de `VKU10_student_info_current_program`
   (misma fuente que Asistencia) — incluye 'regular', 'nuevo', 'en riesgo de abandono',
   'solicitud de retiro', etc. (decisión de negocio: esos cuentan como activos).
 - **Estado actual por materia (recuperaciones):** la CTE `desempeno_materia` colapsa cada
-  materia a un solo estado (`MAX(materia_aprobada)` = aprobada si tiene alguna nota
-  aprobatoria). En Kuepa la nota final se **recalcula**: una materia sale reprobada y, tras
-  cumplir entregables, la misma nota aparece aprobada a la semana siguiente. Como cada
-  snapshot lee el estado vigente, `modulos_reprobados` **baja** cuando el estudiante recupera
-  → el comparativo semana vs. semana lo muestra como **mejora** (atribuible al gestor).
+  materia (× programa) a un solo estado: `materia_aprobada = MAX(value ≥ 3.0)` y
+  `nota_materia = MAX(value)` (mejor nota alcanzada). En Kuepa la nota final se **recalcula**:
+  una materia sale reprobada y, tras recuperar, su mejor nota llega a ≥3.0. Como cada snapshot
+  lee el estado vigente, `modulos_reprobados` **baja** cuando el estudiante recupera → el
+  comparativo semana vs. semana lo muestra como **mejora** (atribuible al gestor).
   Por eso `aprobados + reprobados = cursados` exacto (sin doble conteo).
+- **Caso de validación (29649, trasladado):** programa vigente Contabilidad y Finanzas →
+  4 cursados / 1 aprobado / 3 reprobados, nota prom. 1.3 (con la lógica vieja salían 17/1/16).
 - **Limitación (resuelta por el feed `Materias`):** como `Notas` es resumen, muestra *cuántos*
   módulos reprobó cada alumno pero no *cuáles*. El detalle por materia vive ahora en `Materias`.
 

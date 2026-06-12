@@ -1,12 +1,26 @@
 -- ============================================================
--- ALERTA: REPROBACIÓN / DESEMPEÑO ACADÉMICO (OPTIMIZADA)
+-- ALERTA: REPROBACIÓN / DESEMPEÑO ACADÉMICO
 -- Pestaña destino en Sheet: "Notas"
--- Grano: 1 fila por ESTUDIANTE (resumen histórico).
+-- Grano: 1 fila por ESTUDIANTE (resumen histórico de su PROGRAMA VIGENTE).
+--
+-- Dos reglas clave (validadas con el estudiante 29649, trasladado):
+--   1) PROGRAMA VIGENTE: las notas se amarran al programa por
+--      EKU100400.STRUCTURE_ID, que ES el program_id. Solo contamos las
+--      materias cuyo STRUCTURE_ID = programa vigente del estudiante
+--      (VKU10.program_id). Así NO se inflan módulos del programa del que
+--      fue trasladado. (INTEGRATION_PROGRAM_ID del catálogo viene NULL.)
+--   2) CURSADO vs NO CURSADO: FINAL_NOTE_VALUE es STRING.
+--        value > 0        => módulo CURSADO (tiene nota real)
+--        value <= 0 / NULL=> NO cursado (no iniciado / pendiente)  → se excluye
+--        value >= 3.0     => APROBADO ; 0 < value < 3.0 => REPROBADO
+--      (Umbral de aprobación = 3.0. No se usa FINAL_NOTE_APPROVE.)
+--      Limitación aceptada: un 0 "real" (entregó y sacó 0) se trata como
+--      no cursado; en la data de Kuepa el 0 es el placeholder de "no iniciado".
 -- ============================================================
 
 WITH estudiantes_activos AS (
-  -- 1. BASE LIMPIA: Estudiantes deduplicados y con su estado real ampliado
-  SELECT 
+  -- BASE: 1 fila por estudiante con su PROGRAMA VIGENTE (program_id = llave a STRUCTURE_ID)
+  SELECT
     user_id,
     user_incremental,
     user_full_name,
@@ -22,48 +36,48 @@ WITH estudiantes_activos AS (
     "65eb45c11592a80f09decf06", "65eb45e58372400f07c0691e", "66fecda90cc4330faddd4409",
     "60d2650e86a7940eab68ad7f", "60d2653f86a7940eab68ad80", "60d2657686a7940eab68ad81"
   )
-  -- 🚨 CORRECCIÓN CLAVE: El abanico completo de estados que equivalen a "Activo"
+  -- Abanico de estados que equivalen a "Activo" (coherencia con Asistencia / 360)
   AND LOWER(academic_status_name) IN (
-    'regular', 
-    'regular en verificación', 
-    'nuevo', 
-    'en riesgo de abandono', 
+    'regular',
+    'regular en verificación',
+    'nuevo',
+    'en riesgo de abandono',
     'solicitud de retiro'
-  ) 
+  )
   QUALIFY ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY program_id) = 1
 ),
 
-notas_historicas AS (
-  -- 2. NOTAS: Traemos solo las notas publicadas
+notas_cursadas AS (
+  -- NOTAS solo de módulos CURSADOS (value > 0). Trae el program_id de la nota
+  -- vía STRUCTURE_ID para poder restringir luego al programa vigente.
   SELECT
-    E100400.USER_ID AS user_id,
-    E100415.name AS subject_name,
-    SAFE_CAST(E100401.FINAL_NOTE_VALUE AS FLOAT64) AS value,
-    E100401.FINAL_NOTE_APPROVE AS approved
-  FROM `potent-poetry-284019.DSKU_SIS.EKU100401_subjects` AS E100401
-  INNER JOIN `potent-poetry-284019.DSKU_SIS.EKU100400_centralize_final_note` AS E100400
-    ON E100401.__CENTRALIZEFINALNOTES = E100400._ID
-  LEFT JOIN `potent-poetry-284019.DSKU_SIS.EKU100415_subject` AS E100415
-    ON E100415._ID = E100401.SUBJECT_ID
-  WHERE E100401.FINAL_NOTE_VALUE IS NOT NULL
+    cn.USER_ID                                   AS user_id,
+    cn.STRUCTURE_ID                              AS program_id_nota,
+    cat.NAME                                     AS subject_name,
+    SAFE_CAST(s.FINAL_NOTE_VALUE AS FLOAT64)     AS value
+  FROM `potent-poetry-284019.DSKU_SIS.EKU100401_subjects` AS s
+  INNER JOIN `potent-poetry-284019.DSKU_SIS.EKU100400_centralize_final_note` AS cn
+    ON s.__CENTRALIZEFINALNOTES = cn._ID
+  LEFT JOIN `potent-poetry-284019.DSKU_SIS.EKU100415_subject` AS cat
+    ON cat._ID = s.SUBJECT_ID
+  WHERE SAFE_CAST(s.FINAL_NOTE_VALUE AS FLOAT64) > 0
 ),
 
--- 2b. ESTADO ACTUAL POR MATERIA: colapsa todos los registros de una materia a un solo
--- estado. Si EXISTE alguna nota aprobatoria => materia aprobada (recuperada). Así, cuando
--- un estudiante recupera una materia, deja de contar como reprobada (la cuenta BAJA).
+-- ESTADO ACTUAL POR MATERIA: colapsa cada materia (× programa) a un estado.
+-- Recuperación: si la MEJOR nota alcanzada llega a 3.0 => aprobada (la cuenta de
+-- reprobadas BAJA cuando el estudiante recupera).
 desempeno_materia AS (
   SELECT
-    n.user_id,
-    n.subject_name,
-    MAX(CASE WHEN LOWER(TRIM(CAST(n.approved AS STRING))) IN
-              ('true','1','yes','si','sí','aprobado','approved')
-             THEN 1 ELSE 0 END) AS materia_aprobada,
-    MAX(n.value) AS nota_materia   -- mejor nota alcanzada en la materia (refleja recuperación)
-  FROM notas_historicas AS n
-  GROUP BY n.user_id, n.subject_name
+    user_id,
+    program_id_nota,
+    subject_name,
+    MAX(CASE WHEN value >= 3.0 THEN 1 ELSE 0 END) AS materia_aprobada,
+    MAX(value)                                    AS nota_materia
+  FROM notas_cursadas
+  GROUP BY user_id, program_id_nota, subject_name
 )
 
--- 3. RESULTADO FINAL: una fila por estudiante (estado actual de cada materia)
+-- RESULTADO: 1 fila por estudiante, solo materias de su PROGRAMA VIGENTE
 SELECT
   ea.user_incremental,
   ea.user_full_name,
@@ -84,6 +98,7 @@ SELECT
 FROM estudiantes_activos AS ea
 INNER JOIN desempeno_materia AS dm
   ON ea.user_id = dm.user_id
+  AND ea.program_id = dm.program_id_nota   -- 🔑 solo materias del programa vigente
 GROUP BY
   ea.user_incremental,
   ea.user_full_name,

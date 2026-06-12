@@ -777,7 +777,23 @@ def render_reprobacion():
         else:
             if f_mat != fecha_principal:
                 st.caption(f"📅 Snapshot de materias más cercano: {f_mat} (no hay corrida del {fecha_principal})")
-            # Re-agregamos por materia sumando los programas seleccionados
+
+            # Separar por modalidad: las materias de Bachillerato y de Técnico Laboral
+            # no son comparables entre sí (planes y nombres distintos).
+            mod_sel = None
+            if 'modalidad' in m.columns:
+                mods = [x for x in ['Técnico', 'Bachillerato'] if x in set(m['modalidad'])]
+                if len(mods) > 1:
+                    mod_sel = st.radio("Modalidad", mods, horizontal=True,
+                                       key="mat_modalidad", label_visibility="collapsed")
+                elif mods:
+                    mod_sel = mods[0]
+                if mod_sel:
+                    m = m[m['modalidad'] == mod_sel]
+                    etiqueta = 'Técnico Laboral' if mod_sel == 'Técnico' else mod_sel
+                    st.caption(f"Mostrando materias de **{etiqueta}**")
+
+            # Re-agregamos por materia sumando los programas seleccionados (dentro de la modalidad)
             agg = (m.groupby('materia')
                    .agg(reprobaron=('estudiantes_reprobaron', 'sum'),
                         cursaron=('estudiantes_cursaron', 'sum'),

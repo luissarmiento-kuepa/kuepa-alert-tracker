@@ -1,188 +1,134 @@
 -- ============================================================
--- ALERTA: AUSENTISMO (asistencia de módulo vigente)
+-- ALERTA: AUSENTISMO (por DÍAS DE FALTA CONSECUTIVOS hasta la fecha de corte)
 -- Pestaña destino en Sheet: "Asistencia"
--- Grano: 1 fila por estudiante x materia (módulo vigente)
--- Propósito: detectar estudiantes con baja asistencia E identificar
---            sesiones sin registrar por profesores.
--- Snapshot: usa FECHA_REPORTE = CURRENT_DATE().
+-- Grano: 1 fila por ESTUDIANTE (su racha de faltas consecutivas más reciente).
+--
+-- Lógica (dos escalas según programa):
+--   TÉCNICO:        Sin alerta 0-1 · Alerta 1: 2 · Alerta 3: 3-4 · Alerta 5: >=5
+--   BACHILLERATO+:  Sin alerta 0-1 · Alerta 1: 2-4 · Alerta 2: 5-6 · Alerta 3: 7-10 · Alerta 4: >10
+--   Bachillerato FLEX: EXCLUIDO (asistencia no obligatoria).
+--
+-- "Día" = jornada de clase (agrupa todas las materias del día). Si asistió a AL MENOS
+--   una clase ese día => presente (no rompe nada; "presente gana").
+-- La racha NO se acota al módulo vigente: cuenta los días de clase consecutivos más
+--   recientes con falta, hasta la fecha de corte (así Bachillerato puede llegar a >10).
+-- Sesiones sin marcar (ATTENDANCE NULL / sin fila) se IGNORAN: no rompen la racha.
+-- ATTENDANCE: 1=asistió, 0=tarde (ambos = presente), -1=no asistió (falta).
+-- Snapshot: FECHA_REPORTE = CURRENT_DATE(). Llave n8n: clave_registro (estudiante|fecha).
 -- Dataset: DVKU_SIS
 -- ============================================================
 
 WITH
 estudiantes_activos AS (
-  -- Trae solo estudiantes en los programas monitorizados e incluye el ESTADO
   SELECT
     user_id,
     user_incremental,
-    user_full_name AS PROFILE_FULL_NAME,
+    user_full_name AS NOMBRE_ESTUDIANTE,
     program_id,
     program_name,
-    academic_status_name AS ESTADO_ACADEMICO
+    academic_status_name AS ESTADO_ACADEMICO,
+    CASE
+      WHEN program_id IN ("60d2653f86a7940eab68ad80",   -- Bachillerato Plus Online
+                          "60d2657686a7940eab68ad81")   -- Bachillerato Plus Onsite
+      THEN 'Bachillerato'
+      ELSE 'Técnico'
+    END AS tipo_ausentismo
   FROM `potent-poetry-284019.DVKU_SIS.VKU10_student_info_current_program`
-  WHERE
-    program_id IN (
-      "6810ff2fba8d1305eb777ef0",  -- T.L en Auxiliar de Mercadeo y Ventas
-      "678e56f347a9c4130b4e4ac7",  -- T.L. en Contabilidad y Finanzas
-      "67bbbc326b1d000fb530abb5",  -- Técnico Laboral en Recursos Humanos y Riesgo Laboral
-      "67bc7d70d15f4c0fb4a482c1",  -- Técnico Laboral en Programación de Sistemas de Información
-      "686c3f4dd09df00ac3d14ae2",  -- T.L en Servicios Turisticos y Hoteleros
-      "686c479ad09df00ac3d1959a",  -- T.L en Procesamiento y Digitación de Datos
-      "670e626ab638550218b827c0",  -- T.L. en Auxiliar Administrativo
-      "64b847111c6495204eb3e119",  -- Técnico laboral en servicios turísticos y hoteleros
-      "6279265fdb9de50f6405ad9d",  -- Técnico Laboral en Auxiliar de Mercadeo y Ventas
-      "627d48d06c7678122e01d1b6",  -- Técnico Laboral en Auxiliar Administrativo
-      "629e7a7b3289d80f7d3d575e",  -- Técnico laboral en procesamiento de datos
-      "65eb4271441c110f0a76db73",  -- Técnico Laboral en Desarrollo de Software
-      "65eb45c11592a80f09decf06",  -- Técnico Laboral Auxiliar en Recursos Humanos y Riesgo Laboral
-      "65eb45e58372400f07c0691e",  -- Técnico Laboral Auxiliar en Recursos Humanos
-      "66fecda90cc4330faddd4409",  -- Inactivo T.L. en Auxiliar de Mercadeo y Venta
-      "60d2650e86a7940eab68ad7f",  -- Bachillerato Flex
-      "60d2653f86a7940eab68ad80",  -- Bachillerato Plus Online
-      "60d2657686a7940eab68ad81"   -- Bachillerato Plus Onsite
+  WHERE program_id IN (
+      -- TÉCNICOS
+      "6810ff2fba8d1305eb777ef0", "678e56f347a9c4130b4e4ac7", "67bbbc326b1d000fb530abb5",
+      "67bc7d70d15f4c0fb4a482c1", "686c3f4dd09df00ac3d14ae2", "686c479ad09df00ac3d1959a",
+      "670e626ab638550218b827c0", "64b847111c6495204eb3e119", "6279265fdb9de50f6405ad9d",
+      "627d48d06c7678122e01d1b6", "629e7a7b3289d80f7d3d575e", "65eb4271441c110f0a76db73",
+      "65eb45c11592a80f09decf06", "65eb45e58372400f07c0691e", "66fecda90cc4330faddd4409",
+      -- BACHILLERATO PLUS (Flex EXCLUIDO a propósito)
+      "60d2653f86a7940eab68ad80", "60d2657686a7940eab68ad81"
     )
-    -- Solo estudiantes ACTIVOS (mismo abanico de estados que la query de Notas)
     AND LOWER(academic_status_name) IN (
-      'regular',
-      'regular en verificación',
-      'nuevo',
-      'en riesgo de abandono',
-      'solicitud de retiro'
+      'regular', 'regular en verificación', 'nuevo', 'en riesgo de abandono', 'solicitud de retiro'
     )
   QUALIFY ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY program_id) = 1
 ),
-grupo_vigente AS (
-  -- Identifica el grupo académico vigente e incluye el ESTADO
-  SELECT DISTINCT
-    ea.user_id,
+
+dias AS (
+  -- Un registro por estudiante x día de clase. "Presente gana": si asistió a alguna
+  -- clase ese día, el día es presente. Solo días con marca real (1/0/-1).
+  SELECT
     ea.user_incremental,
-    ea.PROFILE_FULL_NAME,
-    ea.program_name,
-    ea.ESTADO_ACADEMICO,
-    as_ses.GROUP,
-    as_ses.SUBJECT,
-    as_ses.LEVEL,
-    as_ses.PROGRAM_STRING,
-    as_ses.LEVEL_STRING,
-    as_ses.GROUP_STRING,
-    as_ses.SUBJECT_STRING,
-    CAST(TIMESTAMP(as_ses.START_DATE_GROUP) AS DATE) AS START_DATE,
-    CAST(TIMESTAMP(as_ses.END_DATE_GROUP) AS DATE) AS END_DATE
+    CAST(TIMESTAMP(au.SESSION) AS DATE) AS dia,
+    MAX(CASE WHEN au.ATTENDANCE IN (1, 0) THEN 1 ELSE 0 END) AS hubo_presente
   FROM estudiantes_activos AS ea
-  LEFT JOIN `potent-poetry-284019.DVKU_SIS.VKU10_attendance_users` AS au
+  JOIN `potent-poetry-284019.DVKU_SIS.VKU10_attendance_users` AS au
     ON ea.user_incremental = au.INCREMENTAL
-  LEFT JOIN
-    `potent-poetry-284019.DVKU_SIS.VKU10_attendance_sessions` AS as_ses
-    ON
-      au.ALLIANCE = as_ses.ALLIANCE
-      AND au.`GROUP` = as_ses.`GROUP`
-      AND au.SECTION = as_ses.SECTION
-      AND au.PERIOD = as_ses.PERIOD
-      AND au.PROGRAM = as_ses.PROGRAM
-      AND au.SUBJECT = as_ses.SUBJECT
-      AND au.LEVEL = as_ses.LEVEL
-  WHERE
-    CAST(TIMESTAMP(as_ses.START_DATE_GROUP) AS DATE) <= CURRENT_DATE()
-    AND CAST(TIMESTAMP(as_ses.END_DATE_GROUP) AS DATE) >= CURRENT_DATE()
+  WHERE au.ATTENDANCE IN (1, 0, -1)   -- ignora sesiones sin marcar (NULL / sin fila)
+    AND CAST(TIMESTAMP(au.SESSION) AS DATE) <= CURRENT_DATE()
+  GROUP BY ea.user_incremental, dia
+),
+
+ordenados AS (
+  SELECT
+    user_incremental,
+    hubo_presente,
+    ROW_NUMBER() OVER (PARTITION BY user_incremental ORDER BY dia DESC) AS rn
+  FROM dias
+),
+
+racha AS (
+  -- Días consecutivos de falta más recientes = hasta el primer día presente (rn más bajo).
+  -- Si nunca hubo día presente => todos sus días son falta (COUNT(*)).
+  SELECT
+    user_incremental,
+    COALESCE(MIN(CASE WHEN hubo_presente = 1 THEN rn END) - 1, COUNT(*)) AS dias_falta_consecutivos
+  FROM ordenados
+  GROUP BY user_incremental
 )
+
 SELECT
-  gv.user_incremental,
-  gv.PROFILE_FULL_NAME AS NOMBRE_ESTUDIANTE,
-  gv.ESTADO_ACADEMICO,
-  gv.program_name AS PROGRAMA,
-  gv.LEVEL_STRING AS NIVEL,
-  gv.GROUP_STRING AS GRUPO,
-  gv.SUBJECT_STRING AS ASIGNATURA,
-  gv.START_DATE,
-  gv.END_DATE,
-
-  -- SESIONES PROGRAMADAS
-  COUNT(DISTINCT CAST(TIMESTAMP(as_ses.SESSION) AS DATE))
-    AS TOTAL_SESIONES_PROGRAMADAS,
-
-  -- SESIONES CON REGISTRO DE ASISTENCIA
-  COUNT(DISTINCT CASE WHEN au.INCREMENTAL IS NOT NULL THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END)
-    AS TOTAL_SESIONES_REGISTRADAS,
-
-  -- SESIONES SIN REGISTRAR POR PROFESORES
-  COUNT(DISTINCT CAST(TIMESTAMP(as_ses.SESSION) AS DATE))
-    - COUNT(DISTINCT CASE WHEN au.INCREMENTAL IS NOT NULL THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END)
-    AS SESIONES_SIN_REGISTRAR,
-
-  -- DESGLOSE DE ASISTENCIA
-  COUNT(DISTINCT CASE WHEN au.ATTENDANCE = 1 THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END)
-    AS SESIONES_ASISTIO,
-  COUNT(DISTINCT CASE WHEN au.ATTENDANCE = -1 THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END)
-    AS SESIONES_NO_ASISTIO,
-  COUNT(DISTINCT CASE WHEN au.ATTENDANCE = 0 THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END)
-    AS SESIONES_TARDE,
-  COUNT(DISTINCT CASE WHEN au.ATTENDANCE IS NULL THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END)
-    AS SESIONES_PENDIENTE,
-
-  -- PORCENTAJE DE ASISTENCIA
-  ROUND(
-    100.0
-    * COUNT(DISTINCT CASE WHEN au.ATTENDANCE = 1 THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END)
-    / NULLIF(COUNT(DISTINCT CASE WHEN au.INCREMENTAL IS NOT NULL THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END), 0),
-    2
-  ) AS PORCENTAJE_ASISTENCIA,
-
-  -- NIVEL DE ALERTA
+  ea.user_incremental,
+  ea.NOMBRE_ESTUDIANTE,
+  ea.ESTADO_ACADEMICO,
+  ea.program_name AS PROGRAMA,
+  ea.tipo_ausentismo,
+  r.dias_falta_consecutivos,
+  -- NIVEL según escala por tipo de programa
   CASE
-    WHEN
-      ROUND(100.0 * COUNT(DISTINCT CASE WHEN au.ATTENDANCE = 1 THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END) / NULLIF(COUNT(DISTINCT CASE WHEN au.INCREMENTAL IS NOT NULL THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END), 0), 2) < 50
-      THEN '🔴 CRÍTICO'
-    WHEN
-      ROUND(100.0 * COUNT(DISTINCT CASE WHEN au.ATTENDANCE = 1 THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END) / NULLIF(COUNT(DISTINCT CASE WHEN au.INCREMENTAL IS NOT NULL THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END), 0), 2) < 70
-      THEN '🟡 ALERTA'
-    WHEN
-      ROUND(100.0 * COUNT(DISTINCT CASE WHEN au.ATTENDANCE = 1 THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END) / NULLIF(COUNT(DISTINCT CASE WHEN au.INCREMENTAL IS NOT NULL THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END), 0), 2) < 85
-      THEN '🟠 BAJO'
-    ELSE '🟢 NORMAL'
+    WHEN ea.tipo_ausentismo = 'Bachillerato' THEN
+      CASE
+        WHEN r.dias_falta_consecutivos <= 1 THEN 'SIN ALERTA'
+        WHEN r.dias_falta_consecutivos BETWEEN 2 AND 4 THEN 'ALERTA 1'
+        WHEN r.dias_falta_consecutivos BETWEEN 5 AND 6 THEN 'ALERTA 2'
+        WHEN r.dias_falta_consecutivos BETWEEN 7 AND 10 THEN 'ALERTA 3'
+        ELSE 'ALERTA 4'
+      END
+    ELSE  -- Técnico
+      CASE
+        WHEN r.dias_falta_consecutivos <= 1 THEN 'SIN ALERTA'
+        WHEN r.dias_falta_consecutivos = 2 THEN 'ALERTA 1'
+        WHEN r.dias_falta_consecutivos BETWEEN 3 AND 4 THEN 'ALERTA 3'
+        ELSE 'ALERTA 5'
+      END
   END AS NIVEL_ALERTA,
-
-  -- ALERTA SOBRE SESIONES SIN REGISTRAR (operativa, equipo docente)
+  -- gravedad numérica 0..5 (color/orden en el dashboard; mayor = peor)
   CASE
-    WHEN COUNT(DISTINCT CAST(TIMESTAMP(as_ses.SESSION) AS DATE))
-      - COUNT(DISTINCT CASE WHEN au.INCREMENTAL IS NOT NULL THEN CAST(TIMESTAMP(au.SESSION) AS DATE) END) > 0
-      THEN '⚠️ PENDIENTE REGISTRO'
-    ELSE '✅ TODO REGISTRADO'
-  END AS ESTADO_REGISTRO_PROFESORES,
-
+    WHEN ea.tipo_ausentismo = 'Bachillerato' THEN
+      CASE
+        WHEN r.dias_falta_consecutivos <= 1 THEN 0
+        WHEN r.dias_falta_consecutivos BETWEEN 2 AND 4 THEN 1
+        WHEN r.dias_falta_consecutivos BETWEEN 5 AND 6 THEN 2
+        WHEN r.dias_falta_consecutivos BETWEEN 7 AND 10 THEN 3
+        ELSE 4
+      END
+    ELSE
+      CASE
+        WHEN r.dias_falta_consecutivos <= 1 THEN 0
+        WHEN r.dias_falta_consecutivos = 2 THEN 1
+        WHEN r.dias_falta_consecutivos BETWEEN 3 AND 4 THEN 3
+        ELSE 5
+      END
+  END AS gravedad_ausentismo,
   CURRENT_DATE() AS FECHA_REPORTE,
-
-  -- LLAVE ÚNICA para "Append or Update" en n8n (estudiante | materia | fecha snapshot)
-  -- Incluye la fecha => cada semana inserta fila nueva (no sobreescribe el histórico).
-  CONCAT(CAST(gv.user_incremental AS STRING), '|', gv.SUBJECT_STRING, '|', CAST(CURRENT_DATE() AS STRING))
-    AS clave_registro
-FROM grupo_vigente AS gv
-LEFT JOIN `potent-poetry-284019.DVKU_SIS.VKU10_attendance_users` AS au
-  ON
-    gv.user_incremental = au.INCREMENTAL
-    AND gv.GROUP = au.`GROUP`
-    AND gv.SUBJECT = au.SUBJECT
-    AND gv.LEVEL = au.LEVEL
-    AND CAST(TIMESTAMP(au.SESSION) AS DATE) BETWEEN gv.START_DATE AND CURRENT_DATE()
-LEFT JOIN `potent-poetry-284019.DVKU_SIS.VKU10_attendance_sessions` AS as_ses
-  ON
-    gv.GROUP = as_ses.`GROUP`
-    AND gv.SUBJECT = as_ses.SUBJECT
-    AND gv.LEVEL = as_ses.LEVEL
-    AND CAST(TIMESTAMP(as_ses.SESSION) AS DATE) BETWEEN gv.START_DATE AND CURRENT_DATE()
-GROUP BY
-  gv.user_incremental,
-  gv.PROFILE_FULL_NAME,
-  gv.ESTADO_ACADEMICO,
-  gv.program_name,
-  gv.LEVEL_STRING,
-  gv.GROUP_STRING,
-  gv.SUBJECT_STRING,
-  gv.START_DATE,
-  gv.END_DATE
-HAVING
-  PORCENTAJE_ASISTENCIA < 85
-  OR SESIONES_SIN_REGISTRAR > 0
-ORDER BY
-  ESTADO_REGISTRO_PROFESORES DESC,
-  PORCENTAJE_ASISTENCIA ASC,
-  gv.program_name,
-  gv.ESTADO_ACADEMICO;
+  CONCAT(CAST(ea.user_incremental AS STRING), '|', CAST(CURRENT_DATE() AS STRING)) AS clave_registro
+FROM racha AS r
+JOIN estudiantes_activos AS ea
+  ON ea.user_incremental = r.user_incremental
+ORDER BY gravedad_ausentismo DESC, r.dias_falta_consecutivos DESC;

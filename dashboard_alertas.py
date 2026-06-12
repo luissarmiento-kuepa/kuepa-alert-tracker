@@ -487,8 +487,24 @@ def load_notas():
     df['fecha_informe'] = _parse_fecha_series(df['fecha_informe'])
     return df.dropna(subset=['fecha_informe'])
 
+@st.cache_data(ttl=300)
+def load_materias():
+    """Ranking de materias más reprobadas (1 fila por programa × materia)."""
+    try:
+        df = _get_worksheet_df("Materias")
+    except Exception:
+        return pd.DataFrame()
+    if df.empty or 'fecha_informe' not in df.columns:
+        return pd.DataFrame()
+    for c in ['estudiantes_cursaron', 'estudiantes_reprobaron', 'pct_reprobacion', 'nota_promedio']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.', regex=False), errors='coerce')
+    df['fecha_informe'] = _parse_fecha_series(df['fecha_informe'])
+    return df.dropna(subset=['fecha_informe'])
+
 df_asis_all  = load_asistencia()
 df_notas_all = load_notas()
+df_mat_all   = load_materias()
 
 # Paleta para niveles de asistencia
 ASIS_ORDER  = ['🔴 CRÍTICO', '🟡 ALERTA', '🟠 BAJO', '🟢 NORMAL']
@@ -522,8 +538,17 @@ def _overlap_caption(serie_ids):
             f"<b>🎯 Riesgo 360</b></p>",
             unsafe_allow_html=True)
 
+def _chart_help(text):
+    """Copy explicativo bajo una gráfica: cómo leerla y qué hacer con ella."""
+    st.markdown(
+        f"<p style='color:#9AA0A6; font-size:0.84rem; line-height:1.45; "
+        f"margin:-0.3rem 0 0.6rem 0'>{text}</p>",
+        unsafe_allow_html=True)
+
 # ============================================================
-# PESTAÑA: AUSENTISMO
+# PESTAÑA: AUSENTISMO  ·  [PARKED] fuera del aire (en revisión).
+# El feed v2 cambió a "días de falta consecutivos" y este render aún usa
+# PORCENTAJE_ASISTENCIA, por eso no se cablea a ninguna pestaña todavía.
 # ============================================================
 SEV_RANK = {'🔴 CRÍTICO': 3, '🟡 ALERTA': 2, '🟠 BAJO': 1, '🟢 NORMAL': 0}
 
@@ -666,33 +691,150 @@ def render_reprobacion():
     con_rep = d[d['modulos_reprobados'] > 0]['user_incremental'].nunique()
     tot_rep = int(d['modulos_reprobados'].sum())
     prom    = d['nota_promedio'].mean()
+    pct_afect = con_rep / total * 100 if total else 0
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("👥 Estudiantes", total)
-    c2.metric("📕 Con ≥1 reprobada", con_rep, f"{con_rep / total * 100:.1f}%" if total else "0%", delta_color="inverse")
+    c2.metric("📕 Con ≥1 reprobada", con_rep, f"{pct_afect:.1f}%" if total else "0%", delta_color="inverse")
     c3.metric("📚 Módulos reprobados", tot_rep)
     c4.metric("📊 Nota promedio", f"{prom:.2f}" if pd.notna(prom) else "—")
+    _chart_help(
+        f"Lee así: de <b>{total}</b> estudiantes activos, <b>{con_rep}</b> "
+        f"(<b>{pct_afect:.0f}%</b>) arrastran al menos un módulo reprobado, sumando "
+        f"<b>{tot_rep}</b> reprobaciones en total. La nota promedio es sobre la mejor "
+        f"nota lograda en cada materia, así que <i>ya descuenta recuperaciones</i>: si el "
+        f"número baja semana a semana, el gestor está moviendo la aguja.")
     _overlap_caption(d[d['modulos_reprobados'] > 0]['user_incremental'])
     st.divider()
 
-    st.markdown("<div class='section-title'>Estudiantes con Reprobaciones por Programa</div>", unsafe_allow_html=True)
-    bar = (d[d['modulos_reprobados'] > 0].groupby('program_name')['user_incremental']
-           .nunique().reset_index(name='estudiantes').sort_values('estudiantes'))
-    fig = go.Figure(go.Bar(
-        y=bar['program_name'], x=bar['estudiantes'], orientation='h',
-        marker=dict(color="#C0392B", line=dict(width=0)),
-        text=bar['estudiantes'], textposition='inside', insidetextanchor='middle',
-        textfont=dict(color='white', size=12, family='Barlow'),
-    ))
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#C0C0C0", family="Barlow"),
-        height=max(380, bar['program_name'].nunique() * 50), margin=dict(l=10, r=20, t=30, b=20),
-        xaxis=dict(**AXIS), yaxis=dict(**AXIS),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    # ── 1. ¿QUIÉNES? Estudiantes afectados: por programa + por carga de reprobación ──
+    g1, g2 = st.columns([1.3, 1])
+    with g1:
+        st.markdown("<div class='section-title'>¿Dónde están? — Estudiantes con reprobaciones por programa</div>", unsafe_allow_html=True)
+        bar = (d[d['modulos_reprobados'] > 0].groupby('program_name')['user_incremental']
+               .nunique().reset_index(name='estudiantes').sort_values('estudiantes'))
+        fig = go.Figure(go.Bar(
+            y=bar['program_name'], x=bar['estudiantes'], orientation='h',
+            marker=dict(color="#C0392B", line=dict(width=0)),
+            text=bar['estudiantes'], textposition='outside',
+            textfont=dict(color='#FAFAFA', size=13, family='Barlow'),
+            hovertemplate="<b>%{y}</b><br>%{x} estudiantes con ≥1 reprobada<extra></extra>",
+        ))
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#C0C0C0", family="Barlow"),
+            height=max(330, bar['program_name'].nunique() * 46), margin=dict(l=10, r=44, t=20, b=20),
+            xaxis=dict(**AXIS), yaxis=dict(**AXIS),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        _chart_help("Cada barra es el <b>nº de estudiantes distintos</b> con al menos un módulo "
+                    "reprobado en ese programa. Sirve para repartir la carga de gestión entre coordinaciones.")
+    with g2:
+        st.markdown("<div class='section-title'>¿Qué tan grave? — Módulos reprobados por estudiante</div>", unsafe_allow_html=True)
+        rep = d[d['modulos_reprobados'] > 0]['modulos_reprobados']
+        buckets = pd.cut(rep, bins=[0, 1, 2, 3, 100], labels=['1', '2', '3', '4+'])
+        dist = buckets.value_counts().reindex(['1', '2', '3', '4+']).fillna(0).astype(int)
+        bucket_colors = ['#F5A623', '#FD531E', '#C0392B', '#7B0000']
+        fig_b = go.Figure(go.Bar(
+            x=dist.index, y=dist.values,
+            marker=dict(color=bucket_colors, line=dict(width=0)),
+            text=dist.values, textposition='outside',
+            textfont=dict(color='#FAFAFA', size=13, family='Barlow'),
+            hovertemplate="<b>%{x} módulo(s) reprobado(s)</b><br>%{y} estudiantes<extra></extra>",
+        ))
+        fig_b.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#C0C0C0", family="Barlow"),
+            height=max(330, 330), margin=dict(l=10, r=10, t=20, b=20),
+            xaxis=dict(title="Módulos reprobados", **AXIS), yaxis=dict(**AXIS),
+        )
+        st.plotly_chart(fig_b, use_container_width=True)
+        multi_rep = int((rep >= 3).sum())
+        _chart_help(f"Distribución de la <b>severidad</b>. Los <b>{multi_rep}</b> estudiantes con "
+                    f"3+ módulos reprobados son los más cerca de la deserción: priorízalos.")
     st.divider()
 
-    st.markdown("<div class='section-title'>Desempeño por Estudiante (con reprobaciones)</div>", unsafe_allow_html=True)
+    # ── 2. ¿QUÉ MATERIAS? Ranking de asignaturas más reprobadas (feed "Materias") ──
+    st.markdown("<div class='section-title' style='border-color:#C0392B'>Materias que más se reprueban</div>", unsafe_allow_html=True)
+    if df_mat_all.empty:
+        st.info("ℹ️ Aún no hay datos a nivel de materia. Falta poblar la pestaña **'Materias'** del "
+                "Sheet con la query `queries/materias_reprobadas.sql` (nodo n8n nuevo). "
+                "Mientras tanto, arriba ya ves el desempeño resumido por estudiante.")
+    else:
+        f_mat = _snapshot_fecha(df_mat_all, fecha_principal)
+        m = df_mat_all[df_mat_all['fecha_informe'] == f_mat].copy()
+        if programas and 'program_name' in m.columns:
+            m = m[m['program_name'].isin(programas)]
+        if len(m) == 0:
+            st.warning("No hay datos de materias para los filtros seleccionados.")
+        else:
+            if f_mat != fecha_principal:
+                st.caption(f"📅 Snapshot de materias más cercano: {f_mat} (no hay corrida del {fecha_principal})")
+            # Re-agregamos por materia sumando los programas seleccionados
+            agg = (m.groupby('materia')
+                   .agg(reprobaron=('estudiantes_reprobaron', 'sum'),
+                        cursaron=('estudiantes_cursaron', 'sum'),
+                        nota=('nota_promedio', 'mean'))
+                   .reset_index())
+            agg['pct'] = (agg['reprobaron'] / agg['cursaron'] * 100).round(1)
+
+            cA, cB = st.columns(2)
+            with cA:
+                st.markdown("<p style='color:#FAFAFA;font-weight:700;font-size:0.95rem;margin:0 0 .3rem'>Por volumen — más estudiantes reprobados</p>", unsafe_allow_html=True)
+                top_v = agg.sort_values('reprobaron').tail(12)
+                fig_v = go.Figure(go.Bar(
+                    y=top_v['materia'], x=top_v['reprobaron'], orientation='h',
+                    marker=dict(color="#C0392B", line=dict(width=0)),
+                    text=top_v['reprobaron'], textposition='outside',
+                    textfont=dict(color='#FAFAFA', size=12, family='Barlow'),
+                    customdata=top_v[['pct', 'cursaron']].values,
+                    hovertemplate="<b>%{y}</b><br>%{x} reprobados de %{customdata[1]} (%{customdata[0]}%)<extra></extra>",
+                ))
+                fig_v.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#C0C0C0", family="Barlow"),
+                    height=max(380, len(top_v) * 30), margin=dict(l=10, r=44, t=10, b=20),
+                    xaxis=dict(**AXIS), yaxis=dict(**AXIS),
+                )
+                st.plotly_chart(fig_v, use_container_width=True)
+                _chart_help("<b>Cuántos</b> estudiantes cargan cada materia. Es la cola de trabajo: "
+                            "atender estas materias descarga al mayor número de alumnos.")
+            with cB:
+                st.markdown("<p style='color:#FAFAFA;font-weight:700;font-size:0.95rem;margin:0 0 .3rem'>Por dificultad — mayor % de reprobación</p>", unsafe_allow_html=True)
+                # % solo es comparable con masa suficiente: pedimos ≥5 que la cursaron
+                top_p = agg[agg['cursaron'] >= 5].sort_values('pct').tail(12)
+                fig_p = go.Figure(go.Bar(
+                    y=top_p['materia'], x=top_p['pct'], orientation='h',
+                    marker=dict(color=top_p['pct'],
+                                colorscale=[[0, '#F5A623'], [0.5, '#FD531E'], [1, '#7B0000']], line=dict(width=0)),
+                    text=top_p['pct'].map(lambda v: f"{v:.0f}%"), textposition='outside',
+                    textfont=dict(color='#FAFAFA', size=12, family='Barlow'),
+                    customdata=top_p[['reprobaron', 'cursaron']].values,
+                    hovertemplate="<b>%{y}</b><br>%{x}% reprueban (%{customdata[0]} de %{customdata[1]})<extra></extra>",
+                ))
+                fig_p.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#C0C0C0", family="Barlow"),
+                    height=max(380, len(top_p) * 30), margin=dict(l=10, r=50, t=10, b=20),
+                    xaxis=dict(ticksuffix="%", **AXIS), yaxis=dict(**AXIS),
+                )
+                st.plotly_chart(fig_p, use_container_width=True)
+                _chart_help("<b>Qué tan dura</b> es cada materia (% de quienes la cursan y la reprueban, "
+                            "mín. 5 estudiantes). Señala dónde revisar contenido, evaluación o apoyo docente.")
+
+            st.markdown("<div class='section-title'>Detalle por materia</div>", unsafe_allow_html=True)
+            tabla = agg.sort_values('reprobaron', ascending=False).reset_index(drop=True)
+            tabla['nota'] = tabla['nota'].round(2)
+            st.dataframe(
+                tabla[['materia', 'cursaron', 'reprobaron', 'pct', 'nota']].rename(columns={
+                    'materia': 'Materia', 'cursaron': 'La cursaron', 'reprobaron': 'La reprobaron',
+                    'pct': '% Reprobación', 'nota': 'Nota Prom.',
+                }),
+                use_container_width=True, height=340,
+            )
+    st.divider()
+
+    # ── 3. ¿QUIÉNES en detalle? Tabla por estudiante (para gestión 1-a-1) ──
+    st.markdown("<div class='section-title'>Estudiantes a gestionar — más reprobaciones primero</div>", unsafe_allow_html=True)
     cols_t = ['user_incremental', 'user_full_name', 'program_name', 'modulos_cursados',
               'modulos_aprobados', 'modulos_reprobados', 'nota_promedio']
     cols_t = [c for c in cols_t if c in d.columns]
@@ -705,6 +847,9 @@ def render_reprobacion():
         }),
         use_container_width=True, height=360,
     )
+    _chart_help("Lista accionable para el gestor: cada fila es un estudiante. "
+                "<b>Cursados = Aprobados + Reprobados</b>; cuando recupera una materia, baja "
+                "<i>Reprobados</i> y la fila mejora en el siguiente snapshot.")
 
 # ============================================================
 # PESTAÑA: RIESGO 360 (cruce de las 4 señales)
@@ -717,12 +862,8 @@ def render_riesgo360():
     base['sig_login'] = base['gravedad'] >= 3
     base['sig_mora']  = base['financial_status_name'].isin(['Mora avanzada', 'Baja por mora'])
 
+    # 📉 Señal de ausentismo: PAUSADA junto con su pestaña (feed v2 en revisión).
     base['sig_asis'] = False
-    if not df_asis_all.empty:
-        da = df_asis_all[df_asis_all['fecha_informe'] == _snapshot_fecha(df_asis_all, fecha_principal)].copy()
-        da['user_incremental'] = da['user_incremental'].astype(str)
-        worst = da.groupby('user_incremental')['PORCENTAJE_ASISTENCIA'].min()
-        base['sig_asis'] = base['user_incremental'].map(worst < 70).fillna(False)
 
     base['sig_reprob'] = False
     if not df_notas_all.empty:
@@ -737,8 +878,8 @@ def render_riesgo360():
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("🎯 Riesgo múltiple (2+)", int((base['num_senales'] >= 2).sum()))
-    c2.metric("🚨 3+ señales",          int((base['num_senales'] >= 3).sum()))
-    c3.metric("📉 Ausentismo",           int(base['sig_asis'].sum()))
+    c2.metric("🔌 Login grave",          int(base['sig_login'].sum()))
+    c3.metric("💳 Mora",                  int(base['sig_mora'].sum()))
     c4.metric("📕 Con reprobaciones",    int(base['sig_reprob'].sum()))
     st.divider()
 
@@ -792,8 +933,10 @@ def render_riesgo360():
 # ============================================================
 # NAVEGACIÓN POR PESTAÑAS
 # ============================================================
-tab_360, tab_conexion, tab_asis, tab_reprob = st.tabs(
-    ["🎯 Riesgo 360", "🔌 Conexión", "📉 Ausentismo", "📕 Reprobación"]
+# 📉 Ausentismo: temporalmente FUERA DEL AIRE (feed v2 en revisión, evita confusión).
+# La función render_ausentismo() y su loader quedan en el código para reactivarla luego.
+tab_360, tab_conexion, tab_reprob = st.tabs(
+    ["🎯 Riesgo 360", "🔌 Conexión", "📕 Reprobación"]
 )
 
 with tab_360:
@@ -1394,9 +1537,6 @@ with tab_conexion:
             st.plotly_chart(fig_gestor, use_container_width=True)
         else:
             st.info("No hay gestores asignados en los datos de esta fecha.")
-
-with tab_asis:
-    render_ausentismo()
 
 with tab_reprob:
     render_reprobacion()

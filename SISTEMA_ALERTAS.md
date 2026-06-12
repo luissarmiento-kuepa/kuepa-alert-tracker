@@ -5,7 +5,7 @@
 > **Manténlo actualizado**: cada vez que se complete un paso, marca el checklist y
 > anota decisiones nuevas en la sección correspondiente.
 
-Última actualización: 2026-06-11
+Última actualización: 2026-06-12
 
 ---
 
@@ -92,17 +92,23 @@ Por eso se trabaja en dos niveles:
 `gestor_asignado`, `fecha_informe`.
 Derivadas en el código: `gravedad` (rank 0–6), `fin_rank` (0–5), `etapa` (Lectiva/Productiva).
 
-### Asistencia (ausentismo) — query lista
-Dataset `DVKU_SIS`. Salida: `user_incremental`, `NOMBRE_ESTUDIANTE`, `ESTADO_ACADEMICO`,
-`PROGRAMA`, `NIVEL`, `GRUPO`, `ASIGNATURA`, `START_DATE`, `END_DATE`,
-`TOTAL_SESIONES_PROGRAMADAS`, `TOTAL_SESIONES_REGISTRADAS`, `SESIONES_SIN_REGISTRAR`,
-`SESIONES_ASISTIO`, `SESIONES_NO_ASISTIO`, `SESIONES_TARDE`, `SESIONES_PENDIENTE`,
-`PORCENTAJE_ASISTENCIA`, `NIVEL_ALERTA` (🔴 CRÍTICO <50 / 🟡 ALERTA <70 / 🟠 BAJO <85 /
-🟢 NORMAL), `ESTADO_REGISTRO_PROFESORES` (⚠️ PENDIENTE REGISTRO / ✅ TODO REGISTRADO),
-`FECHA_REPORTE` (sirve como snapshot), `clave_registro` (llave única para n8n).
-- **"Activo":** filtra por `academic_status_name` (mismo abanico de estados que Notas:
-  'regular', 'nuevo', 'en riesgo de abandono', 'solicitud de retiro', etc.) → ambas
-  pestañas miran el mismo universo de estudiantes (coherencia para Riesgo 360).
+### Asistencia / Ausentismo — query lista (v2: por días de falta consecutivos)
+Dataset `DVKU_SIS`. Pestaña destino del Sheet sigue siendo `Asistencia`.
+Salida (1 fila por **estudiante**): `user_incremental`, `NOMBRE_ESTUDIANTE`,
+`ESTADO_ACADEMICO`, `PROGRAMA`, `tipo_ausentismo` (Bachillerato/Técnico),
+`dias_falta_consecutivos`, `NIVEL_ALERTA`, `gravedad_ausentismo` (0–5, mayor=peor),
+`FECHA_REPORTE`, `clave_registro` (= `estudiante|fecha`).
+- **Lógica = racha de faltas CONSECUTIVAS** hasta la fecha de corte (ya NO es % de asistencia).
+  Escalas distintas por programa:
+  - **Técnico:** Sin alerta 0–1 · Alerta 1: 2 · Alerta 3: 3–4 · Alerta 5: ≥5
+  - **Bachillerato Plus:** Sin alerta 0–1 · Alerta 1: 2–4 · Alerta 2: 5–6 · Alerta 3: 7–10 · Alerta 4: >10
+- **Bachillerato Flex EXCLUIDO** (asistencia no obligatoria; se sacó su `program_id`).
+- **"Día"** = jornada de clase programada (no día calendario). Si asistió a ≥1 clase ese día →
+  presente. Sesiones sin registrar (ATTENDANCE NULL) se **ignoran** (no rompen la racha).
+- **"Activo":** mismo abanico de `academic_status_name` que Notas (coherencia Riesgo 360).
+- **Cambio importante:** esta v2 ya **no trae** el panel de "sesiones sin registrar (docentes)"
+  ni columnas de % / sesiones. Si se quiere ese panel operativo, sería un feed aparte.
+  El **dashboard (`render_ausentismo`) debe reescribirse** a este nuevo esquema.
 
 ### Notas (reprobación / desempeño académico) — query lista
 Datasets `DVKU_SIS` (estudiantes/estado) + `DSKU_SIS` (notas). Salida (1 fila por
@@ -123,10 +129,23 @@ Datasets `DVKU_SIS` (estudiantes/estado) + `DSKU_SIS` (notas). Salida (1 fila po
   snapshot lee el estado vigente, `modulos_reprobados` **baja** cuando el estudiante recupera
   → el comparativo semana vs. semana lo muestra como **mejora** (atribuible al gestor).
   Por eso `aprobados + reprobados = cursados` exacto (sin doble conteo).
-- **Limitación:** como es resumen, el dashboard muestra *cuántos* módulos reprobó pero no
-  *cuáles*. Si se quiere el detalle por materia, sería un feed adicional.
+- **Limitación (resuelta por el feed `Materias`):** como `Notas` es resumen, muestra *cuántos*
+  módulos reprobó cada alumno pero no *cuáles*. El detalle por materia vive ahora en `Materias`.
 
-> Nota: la lista de `program_id` monitoreados coincide entre las tres queries, así que
+### Materias (ranking de reprobación por asignatura) — query lista
+Datasets `DVKU_SIS` + `DSKU_SIS` (mismas CTEs que `Notas`, solo cambia el grano del SELECT).
+SQL en `queries/materias_reprobadas.sql`, pestaña destino `Materias`. Salida (1 fila por
+**programa × materia**): `modalidad`, `program_name`, `materia`, `estudiantes_cursaron`,
+`estudiantes_reprobaron`, `pct_reprobacion`, `nota_promedio`, `fecha_informe`,
+`clave_registro` (= `programa|materia|fecha`, llave única n8n).
+- **Para qué:** responde "**qué materias se reprueban más**" (acción curricular/pedagógica),
+  no solo gestión 1-a-1. El dashboard re-agrega por materia sumando los programas del filtro.
+- **Grano por programa (no solo materia):** lo conserva para que el filtro de programas del
+  sidebar siga funcionando; los % se re-derivan de los conteos en el front.
+- `HAVING estudiantes_reprobaron > 0`: solo entran al ranking materias con ≥1 reprobada.
+- **"Activo" / recuperaciones / "cursado":** idéntica definición que `Notas` (coherencia).
+
+> Nota: la lista de `program_id` monitoreados coincide entre las cuatro queries, así que
 > el alcance de programas es consistente.
 
 ---
@@ -138,8 +157,8 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
 | Pestaña            | Contenido |
 |--------------------|-----------|
 | 🔌 **Conexión**    | El dashboard actual, idéntico (login + financiero). |
-| 📉 **Ausentismo**  | (la pestaña se llama "Ausentismo"; el feed/Sheet sigue siendo "Asistencia"). Semáforo de tarjetas (🔴 crítico <50% / 🟡 alerta 50–70% / 🟠 bajo 70–85%) + dona de distribución + ranking "dónde priorizar" por programa + tabla "estudiantes a contactar" + **panel aparte** "Sesiones sin registrar (docentes)". Severidad por estudiante = su peor materia. |
-| 📕 **Reprobación** | Desempeño académico histórico por estudiante: métricas (alumnos con ≥1 reprobada, total módulos reprobados, nota promedio) · barras por programa · tabla por estudiante (cursados / aprobados / reprobados). |
+| 📉 **Ausentismo**  | ⏸️ **FUERA DEL AIRE** (pestaña retirada de la navegación, 2026-06-12). El feed v2 cambió a "días de falta consecutivos" pero `render_ausentismo()` aún usa `PORCENTAJE_ASISTENCIA` → generaba confusión. La función y su loader siguen en el código (sin cablear) para reactivarla tras reescribir el render al nuevo esquema. La señal `sig_asis` de Riesgo 360 quedó en pausa (`False`). |
+| 📕 **Reprobación** | Tres bloques con copy explicativo en cada gráfica: (1) **¿quiénes?** estudiantes con reprobaciones por programa + distribución de severidad (1/2/3/4+ módulos); (2) **¿qué materias?** ranking de asignaturas más reprobadas — por **volumen** (nº de estudiantes) y por **dificultad** (% reprobación, mín. 5 cursaron) + tabla detalle (feed `Materias`); (3) tabla accionable por estudiante. |
 | 🎯 **Riesgo 360**  | **Pestaña principal (default).** Gráfico de **combinaciones de riesgo más frecuentes** + métricas de señales + tabla **"Riesgo Múltiple"** (estudiantes con 2+ alertas: login + mora + ausentismo + reprobación). Es el centro del sistema: ver quiénes combinan alertas, no alertas sueltas. |
 
 ---
@@ -156,20 +175,23 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
 
 ### Fase 1 — Datos (lado n8n)
 - [x] Ajustar query de Notas: agregar `CURRENT_DATE() AS fecha_informe` → en `queries/notas_reprobacion.sql`.
-- [ ] Nodo n8n + pestaña `Asistencia` poblándose semanalmente (SQL en `queries/asistencia_ausentismo.sql`).
+- [ ] ⏸️ Nodo `Asistencia`: EN PAUSA (feed v2 listo, pero la pestaña está fuera del aire — ver §4).
 - [ ] Nodo n8n + pestaña `Notas` poblándose semanalmente (SQL en `queries/notas_reprobacion.sql`).
-- [ ] Confirmar que los 3 nodos corren en la misma ejecución (fechas alineadas).
+- [ ] **Nodo n8n + pestaña `Materias`** poblándose semanalmente (SQL en `queries/materias_reprobadas.sql`).
+- [ ] Confirmar que los nodos activos corren en la misma ejecución (fechas alineadas).
 
 ### Fase 2 — Dashboard (código)
-- [x] Loaders `load_asistencia()` / `load_notas()` (leen pestañas Asistencia/Notas, parsean fecha).
+- [x] Loaders `load_asistencia()` / `load_notas()` / `load_materias()` (leen pestañas, parsean fecha).
 - [x] Envolver la página actual en `st.tabs` bajo `with tab0:` ("🔌 Conexión" intacta).
-- [x] Pestaña 📉 Asistencia (`render_asistencia`): métricas + barras por programa + tabla + panel docentes.
-- [x] Pestaña 📕 Reprobación (`render_reprobacion`): métricas + barras + tabla por estudiante.
-- [x] Pestaña 🎯 Riesgo 360 (`render_riesgo360`): 4 señales + tabla Riesgo Múltiple.
+- [x] Pestaña 🎯 Riesgo 360 (`render_riesgo360`): señales login+mora+reprobación + tabla Riesgo Múltiple.
 - [x] Probado en vivo (carga datos; usa snapshot más cercano con `_snapshot_fecha` si hay drift de fechas).
-- [x] Pulido v1: pestañas con estilo Kuepa (píldoras), gráfico de **combinaciones de riesgo** en 360,
-  Reprobación por nº de estudiantes afectados, y caption de solapamiento (`_overlap_caption`) que liga
-  cada pestaña a Riesgo 360.
+- [x] **Reprobación reforzada (2026-06-12):** 3 bloques con copy explicativo (`_chart_help`):
+  (1) por programa + distribución de severidad (1/2/3/4+ módulos); (2) **ranking de materias**
+  por volumen y por % de dificultad + tabla detalle (feed `Materias`, degrada con aviso si vacío);
+  (3) tabla accionable por estudiante.
+- [x] **Ausentismo retirado del aire (2026-06-12):** pestaña fuera de `st.tabs`, señal `sig_asis`
+  de 360 en pausa. `render_ausentismo()` / `load_asistencia()` quedan en el código sin cablear.
+- [ ] Reescribir `render_ausentismo()` al esquema v2 (días de falta) y reactivar pestaña + señal 360.
 - [ ] Comparativos/eficacia week-over-week en las pestañas nuevas (v1 muestra fecha actual).
 
 Notas de implementación: el bloque de contenido original quedó indentado +4 dentro de

@@ -755,11 +755,49 @@ def render_reprobacion():
             height=max(330, 330), margin=dict(l=10, r=10, t=20, b=20),
             xaxis=dict(title="Módulos reprobados", **AXIS), yaxis=dict(**AXIS),
         )
-        st.plotly_chart(fig_b, use_container_width=True)
+        sev_event = st.plotly_chart(fig_b, use_container_width=True,
+                                    on_select="rerun", key="rep_sev_sel")
         multi_rep = int((rep >= 3).sum())
         _chart_help(f"Distribución de la <b>severidad</b>. Los <b>{multi_rep}</b> estudiantes con "
-                    f"3+ módulos reprobados son los más cerca de la deserción: priorízalos.")
+                    f"3+ módulos reprobados son los más cerca de la deserción: priorízalos. "
+                    f"<b>Haz clic en una barra</b> para ver y descargar quiénes son.")
     st.divider()
+
+    # ── Drill-down: estudiantes detrás de la barra de severidad que se clicó ──
+    _sev_bucket = None
+    try:
+        _pts = sev_event["selection"]["points"]
+        if _pts:
+            _sev_bucket = str(_pts[0].get("x"))
+    except Exception:
+        _sev_bucket = None
+    _sev_mask = {
+        '1': d['modulos_reprobados'] == 1,
+        '2': d['modulos_reprobados'] == 2,
+        '3': d['modulos_reprobados'] == 3,
+        '4+': d['modulos_reprobados'] >= 4,
+    }.get(_sev_bucket) if _sev_bucket else None
+    if _sev_mask is not None:
+        det = d[_sev_mask]
+        st.markdown(f"<div class='section-title' style='border-color:#F5A623'>👥 Estudiantes con "
+                    f"{_sev_bucket} módulo(s) reprobado(s) — {len(det)} estudiantes</div>", unsafe_allow_html=True)
+        cols_dd = [c for c in ['user_incremental', 'user_full_name', 'program_name', 'modulos_cursados',
+                               'modulos_aprobados', 'modulos_reprobados', 'nota_promedio'] if c in det.columns]
+        det_show = (det[cols_dd].sort_values('nota_promedio').reset_index(drop=True).rename(columns={
+            'user_incremental': 'ID', 'user_full_name': 'Estudiante', 'program_name': 'Programa',
+            'modulos_cursados': 'Cursados', 'modulos_aprobados': 'Aprobados',
+            'modulos_reprobados': 'Reprobados', 'nota_promedio': 'Nota Prom.',
+        }))
+        st.dataframe(det_show, use_container_width=True, height=320)
+        st.download_button(
+            "⬇️ Descargar CSV", det_show.to_csv(index=False).encode('utf-8-sig'),
+            file_name=f"estudiantes_{_sev_bucket}_reprobadas_{fecha_principal}.csv",
+            mime="text/csv", key="dl_sev")
+        st.divider()
+    else:
+        st.caption("👆 Tip: haz clic en una barra de **\"Módulos reprobados por estudiante\"** "
+                   "para desplegar y descargar la lista de esos estudiantes.")
+        st.divider()
 
     # ── 2. ¿QUÉ MATERIAS? Ranking de asignaturas más reprobadas (feed "Materias") ──
     st.markdown("<div class='section-title' style='border-color:#C0392B'>Materias que más se reprueban</div>", unsafe_allow_html=True)
@@ -848,13 +886,15 @@ def render_reprobacion():
             st.markdown("<div class='section-title'>Detalle por materia</div>", unsafe_allow_html=True)
             tabla = agg.sort_values('reprobaron', ascending=False).reset_index(drop=True)
             tabla['nota'] = tabla['nota'].round(2)
-            st.dataframe(
-                tabla[['materia', 'cursaron', 'reprobaron', 'pct', 'nota']].rename(columns={
-                    'materia': 'Materia', 'cursaron': 'La cursaron', 'reprobaron': 'La reprobaron',
-                    'pct': '% Reprobación', 'nota': 'Nota Prom.',
-                }),
-                use_container_width=True, height=340,
-            )
+            tabla_mat = tabla[['materia', 'cursaron', 'reprobaron', 'pct', 'nota']].rename(columns={
+                'materia': 'Materia', 'cursaron': 'La cursaron', 'reprobaron': 'La reprobaron',
+                'pct': '% Reprobación', 'nota': 'Nota Prom.',
+            })
+            st.dataframe(tabla_mat, use_container_width=True, height=340)
+            _suf = f"_{mod_sel}" if mod_sel else ""
+            st.download_button(
+                "⬇️ Descargar materias (CSV)", tabla_mat.to_csv(index=False).encode('utf-8-sig'),
+                file_name=f"materias_reprobadas{_suf}_{fecha_principal}.csv", mime="text/csv", key="dl_mat")
     st.divider()
 
     # ── 3. ¿QUIÉNES en detalle? Tabla por estudiante (para gestión 1-a-1) ──
@@ -862,15 +902,16 @@ def render_reprobacion():
     cols_t = ['user_incremental', 'user_full_name', 'program_name', 'modulos_cursados',
               'modulos_aprobados', 'modulos_reprobados', 'nota_promedio']
     cols_t = [c for c in cols_t if c in d.columns]
-    st.dataframe(
-        d[d['modulos_reprobados'] > 0][cols_t].sort_values('modulos_reprobados', ascending=False)
-        .reset_index(drop=True).rename(columns={
-            'user_incremental': 'ID', 'user_full_name': 'Estudiante', 'program_name': 'Programa',
-            'modulos_cursados': 'Cursados', 'modulos_aprobados': 'Aprobados',
-            'modulos_reprobados': 'Reprobados', 'nota_promedio': 'Nota Prom.',
-        }),
-        use_container_width=True, height=360,
-    )
+    tabla_est = (d[d['modulos_reprobados'] > 0][cols_t].sort_values('modulos_reprobados', ascending=False)
+                 .reset_index(drop=True).rename(columns={
+                     'user_incremental': 'ID', 'user_full_name': 'Estudiante', 'program_name': 'Programa',
+                     'modulos_cursados': 'Cursados', 'modulos_aprobados': 'Aprobados',
+                     'modulos_reprobados': 'Reprobados', 'nota_promedio': 'Nota Prom.',
+                 }))
+    st.dataframe(tabla_est, use_container_width=True, height=360)
+    st.download_button(
+        "⬇️ Descargar lista completa (CSV)", tabla_est.to_csv(index=False).encode('utf-8-sig'),
+        file_name=f"estudiantes_a_gestionar_{fecha_principal}.csv", mime="text/csv", key="dl_est")
     _chart_help("Lista accionable para el gestor: cada fila es un estudiante. "
                 "<b>Cursados = Aprobados + Reprobados</b>; cuando recupera una materia, baja "
                 "<i>Reprobados</i> y la fila mejora en el siguiente snapshot.")

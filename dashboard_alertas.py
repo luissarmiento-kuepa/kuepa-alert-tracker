@@ -695,6 +695,26 @@ def render_reprobacion():
     if f_notas != fecha_principal:
         st.caption(f"📅 Snapshot de notas más cercano: {f_notas} (no hay corrida del {fecha_principal})")
 
+    # ── SELECTOR DE MODALIDAD — controla TODA la pestaña (métricas, gráficas y tablas) ──
+    # Bachillerato y Técnico Laboral tienen planes y materias distintas; verlos mezclados
+    # confunde, así que se elige uno desde el encabezado.
+    mod_sel = None
+    if 'modalidad' in d.columns:
+        mods_all = [x for x in ['Técnico', 'Bachillerato'] if x in set(d['modalidad'])]
+        if len(mods_all) > 1:
+            st.markdown(
+                "<p style='color:#FD531E;font-family:Barlow Condensed,sans-serif;font-weight:800;"
+                "font-size:1.2rem;letter-spacing:.06em;text-transform:uppercase;margin:.2rem 0 .15rem'>"
+                "🎓 Modalidad</p>", unsafe_allow_html=True)
+            mod_sel = st.radio("Modalidad", mods_all, horizontal=True,
+                               key="rep_modalidad", label_visibility="collapsed")
+        elif mods_all:
+            mod_sel = mods_all[0]
+        if mod_sel:
+            d = d[d['modalidad'] == mod_sel]
+    etiqueta_mod = ('Técnico Laboral' if mod_sel == 'Técnico' else mod_sel) if mod_sel else 'todas las modalidades'
+    st.divider()
+
     total   = d['user_incremental'].nunique()
     con_rep = d[d['modulos_reprobados'] > 0]['user_incremental'].nunique()
     tot_rep = int(d['modulos_reprobados'].sum())
@@ -706,7 +726,7 @@ def render_reprobacion():
     c3.metric("📚 Módulos reprobados", tot_rep)
     c4.metric("📊 Nota promedio", f"{prom:.2f}" if pd.notna(prom) else "—")
     _chart_help(
-        f"Lee así: de <b>{total}</b> estudiantes activos, <b>{con_rep}</b> "
+        f"Lee así: de <b>{total}</b> estudiantes activos de <b>{etiqueta_mod}</b>, <b>{con_rep}</b> "
         f"(<b>{pct_afect:.0f}%</b>) arrastran al menos un módulo reprobado, sumando "
         f"<b>{tot_rep}</b> reprobaciones en total. La nota promedio es sobre la mejor "
         f"nota lograda en cada materia, así que <i>ya descuenta recuperaciones</i>: si el "
@@ -810,26 +830,14 @@ def render_reprobacion():
         m = df_mat_all[df_mat_all['fecha_informe'] == f_mat].copy()
         if programas and 'program_name' in m.columns:
             m = m[m['program_name'].isin(programas)]
+        # La modalidad se elige en el encabezado de la pestaña y filtra también el ranking.
+        if mod_sel and 'modalidad' in m.columns:
+            m = m[m['modalidad'] == mod_sel]
         if len(m) == 0:
-            st.warning("No hay datos de materias para los filtros seleccionados.")
+            st.warning(f"No hay materias de {etiqueta_mod} para los filtros seleccionados.")
         else:
             if f_mat != fecha_principal:
                 st.caption(f"📅 Snapshot de materias más cercano: {f_mat} (no hay corrida del {fecha_principal})")
-
-            # Separar por modalidad: las materias de Bachillerato y de Técnico Laboral
-            # no son comparables entre sí (planes y nombres distintos).
-            mod_sel = None
-            if 'modalidad' in m.columns:
-                mods = [x for x in ['Técnico', 'Bachillerato'] if x in set(m['modalidad'])]
-                if len(mods) > 1:
-                    mod_sel = st.radio("Modalidad", mods, horizontal=True,
-                                       key="mat_modalidad", label_visibility="collapsed")
-                elif mods:
-                    mod_sel = mods[0]
-                if mod_sel:
-                    m = m[m['modalidad'] == mod_sel]
-                    etiqueta = 'Técnico Laboral' if mod_sel == 'Técnico' else mod_sel
-                    st.caption(f"Mostrando materias de **{etiqueta}**")
 
             # Re-agregamos por materia sumando los programas seleccionados (dentro de la modalidad)
             agg = (m.groupby('materia')

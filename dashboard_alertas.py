@@ -786,9 +786,11 @@ def render_reprobacion():
             height=max(330, bar['program_name'].nunique() * 46), margin=dict(l=10, r=44, t=20, b=20),
             xaxis=dict(**AXIS), yaxis=dict(**AXIS),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        prog_event = st.plotly_chart(fig, use_container_width=True,
+                                     on_select="rerun", key="rep_prog_sel")
         _chart_help("Cada barra es el <b>nº de estudiantes distintos</b> con al menos un módulo "
-                    "reprobado en ese programa. Sirve para repartir la carga de gestión entre coordinaciones.")
+                    "reprobado en ese programa. Sirve para repartir la carga de gestión entre "
+                    "coordinaciones. <b>Clic en una barra</b> → ver y descargar sus estudiantes.")
     with g2:
         st.markdown("<div class='section-title'>¿Qué tan grave? — Módulos reprobados por estudiante</div>", unsafe_allow_html=True)
         rep = d[d['modulos_reprobados'] > 0]['modulos_reprobados']
@@ -816,7 +818,14 @@ def render_reprobacion():
                     f"<b>Haz clic en una barra</b> para ver y descargar quiénes son.")
     st.divider()
 
-    # ── Drill-down: estudiantes detrás de la barra de severidad que se clicó ──
+    # ── Drill-down: estudiantes detrás de la barra clicada (programa y/o severidad) ──
+    # Una sola tabla que responde a CUALQUIERA de las dos gráficas de arriba; si se clican
+    # ambas, combina los filtros (p. ej. "Bachillerato Flex con 3 módulos reprobados").
+    _sel_progs = []
+    try:
+        _sel_progs = [p.get("y") for p in prog_event["selection"]["points"] if p.get("y")]
+    except Exception:
+        _sel_progs = []
     _sev_bucket = None
     try:
         _pts = sev_event["selection"]["points"]
@@ -824,16 +833,29 @@ def render_reprobacion():
             _sev_bucket = str(_pts[0].get("x"))
     except Exception:
         _sev_bucket = None
-    _sev_mask = {
-        '1': d['modulos_reprobados'] == 1,
-        '2': d['modulos_reprobados'] == 2,
-        '3': d['modulos_reprobados'] == 3,
-        '4+': d['modulos_reprobados'] >= 4,
-    }.get(_sev_bucket) if _sev_bucket else None
-    if _sev_mask is not None:
-        det = d[_sev_mask]
-        st.markdown(f"<div class='section-title' style='border-color:#F5A623'>👥 Estudiantes con "
-                    f"{_sev_bucket} módulo(s) reprobado(s) — {len(det)} estudiantes</div>", unsafe_allow_html=True)
+
+    base = d[d['modulos_reprobados'] > 0]
+    _mask = pd.Series(True, index=base.index)
+    _titulo, _suf = [], []
+    if _sel_progs:
+        _mask &= base['program_name'].isin(_sel_progs)
+        _titulo.append(", ".join(_sel_progs))
+        _suf.append("_".join(_sel_progs)[:30].replace(' ', '_'))
+    _sev_map = {
+        '1': base['modulos_reprobados'] == 1,
+        '2': base['modulos_reprobados'] == 2,
+        '3': base['modulos_reprobados'] == 3,
+        '4+': base['modulos_reprobados'] >= 4,
+    }
+    if _sev_bucket in _sev_map:
+        _mask &= _sev_map[_sev_bucket]
+        _titulo.append(f"{_sev_bucket} módulo(s) reprobado(s)")
+        _suf.append(f"sev{_sev_bucket}")
+
+    if _sel_progs or _sev_bucket in _sev_map:
+        det = base[_mask]
+        st.markdown(f"<div class='section-title' style='border-color:#F5A623'>👥 Estudiantes — "
+                    f"{' · '.join(_titulo)} — {len(det)} estudiantes</div>", unsafe_allow_html=True)
         cols_dd = [c for c in ['user_incremental', 'user_full_name', 'program_name', 'modulos_cursados',
                                'modulos_aprobados', 'modulos_reprobados', 'nota_promedio'] if c in det.columns]
         det_show = (det[cols_dd].sort_values('nota_promedio').reset_index(drop=True).rename(columns={
@@ -844,12 +866,13 @@ def render_reprobacion():
         st.dataframe(det_show, use_container_width=True, height=320)
         st.download_button(
             "⬇️ Descargar CSV", det_show.to_csv(index=False).encode('utf-8-sig'),
-            file_name=f"estudiantes_{_sev_bucket}_reprobadas_{fecha_principal}.csv",
+            file_name=f"estudiantes_{'_'.join(_suf)}_{fecha_principal}.csv",
             mime="text/csv", key="dl_sev")
         st.divider()
     else:
-        st.caption("👆 Tip: haz clic en una barra de **\"Módulos reprobados por estudiante\"** "
-                   "para desplegar y descargar la lista de esos estudiantes.")
+        st.caption("👆 Tip: haz clic en una barra de **programa** o de **\"Módulos reprobados por "
+                   "estudiante\"** para desplegar y descargar la lista de esos estudiantes "
+                   "(puedes combinar ambos filtros).")
         st.divider()
 
     # ── 2. ¿QUÉ MATERIAS? Ranking de asignaturas más reprobadas ──

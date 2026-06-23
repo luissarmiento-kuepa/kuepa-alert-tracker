@@ -926,8 +926,14 @@ def render_reprobacion():
                             "`queries/notas_detalle_materia.sql`, nodo n8n nuevo) para ver la lista "
                             "de estudiantes por materia.")
                 else:
-                    f_det = _snapshot_fecha(df_det_all, fecha_principal)
+                    # 🔑 ALINEAR SNAPSHOT: usar la MISMA fecha que usó para la gráfica de materias
+                    # Esto asegura que gráfica y tabla muestren datos de la misma ejecución
+                    f_det = f_mat  # Usa la fecha de materias, no _snapshot_fecha(df_det_all, ...)
                     dd = df_det_all[df_det_all['fecha_informe'] == f_det].copy()
+                    if len(dd) == 0:
+                        # Si no hay detalle en esa fecha, intenta buscar la más cercana
+                        f_det = _snapshot_fecha(df_det_all, fecha_principal)
+                        dd = df_det_all[df_det_all['fecha_informe'] == f_det].copy()
                     if programas and 'program_name' in dd.columns:
                         dd = dd[dd['program_name'].isin(programas)]
                     if mod_sel and 'modalidad' in dd.columns:
@@ -943,6 +949,7 @@ def render_reprobacion():
                                        'user_incremental': 'ID', 'user_full_name': 'Estudiante',
                                        'program_name': 'Programa', 'materia': 'Materia', 'nota_materia': 'Nota',
                                    }))
+                        st.caption(f"📅 Datos del {f_det} · {len(dd_show)} estudiantes")
                         st.dataframe(dd_show, use_container_width=True, height=320)
                         _nom = "_".join(sel_mats)[:40].replace(' ', '_').replace('/', '-')
                         st.download_button(

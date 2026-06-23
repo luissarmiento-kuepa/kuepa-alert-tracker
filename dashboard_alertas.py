@@ -493,7 +493,12 @@ def load_notas():
         if c in df.columns:
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.', regex=False), errors='coerce')
     df['fecha_informe'] = _parse_fecha_series(df['fecha_informe'])
-    return df.dropna(subset=['fecha_informe'])
+    df = df.dropna(subset=['fecha_informe'])
+    # Defensa contra re-appends de n8n: 1 fila por estudiante × fecha.
+    dedup = [c for c in ['user_incremental', 'fecha_informe'] if c in df.columns]
+    if dedup:
+        df = df.drop_duplicates(subset=dedup)
+    return df
 
 @st.cache_data(ttl=300)
 def load_materias():
@@ -508,7 +513,15 @@ def load_materias():
         if c in df.columns:
             df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.', regex=False), errors='coerce')
     df['fecha_informe'] = _parse_fecha_series(df['fecha_informe'])
-    return df.dropna(subset=['fecha_informe'])
+    df = df.dropna(subset=['fecha_informe'])
+    # Defensa: el ranking suma estudiantes_reprobaron por programa. Si el nodo n8n
+    # appendeó la misma corrida más de una vez, habría filas duplicadas por
+    # (programa, materia, fecha) que inflarían la suma (síntoma: el ranking marca
+    # más reprobados que el drill-down de NotasDetalle). Dedup por la llave única.
+    dedup = [c for c in ['program_name', 'materia', 'fecha_informe'] if c in df.columns]
+    if dedup:
+        df = df.drop_duplicates(subset=dedup)
+    return df
 
 @st.cache_data(ttl=300)
 def load_notas_detalle():
@@ -522,7 +535,12 @@ def load_notas_detalle():
     if 'nota_materia' in df.columns:
         df['nota_materia'] = pd.to_numeric(df['nota_materia'].astype(str).str.replace(',', '.', regex=False), errors='coerce')
     df['fecha_informe'] = _parse_fecha_series(df['fecha_informe'])
-    return df.dropna(subset=['fecha_informe'])
+    df = df.dropna(subset=['fecha_informe'])
+    # Defensa contra re-appends de n8n: 1 fila por estudiante × materia × fecha.
+    dedup = [c for c in ['user_incremental', 'materia', 'fecha_informe'] if c in df.columns]
+    if dedup:
+        df = df.drop_duplicates(subset=dedup)
+    return df
 
 df_asis_all  = load_asistencia()
 df_notas_all = load_notas()

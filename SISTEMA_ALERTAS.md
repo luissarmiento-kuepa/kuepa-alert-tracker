@@ -156,6 +156,13 @@ SQL en `queries/materias_reprobadas.sql`, pestaña destino `Materias`. Salida (1
   sidebar siga funcionando; los % se re-derivan de los conteos en el front.
 - `HAVING estudiantes_reprobaron > 0`: solo entran al ranking materias con ≥1 reprobada.
 - **"Activo" / recuperaciones / "cursado":** idéntica definición que `Notas` (coherencia).
+- **⚠️ Riesgo de duplicados (2026-06-23):** el dashboard **suma** `estudiantes_reprobaron`
+  por programa para armar el ranking. Si el nodo n8n appendea la misma corrida más de una
+  vez, las filas repetidas inflan la suma (síntoma observado: el ranking marcaba 245
+  reprobados en una materia mientras el drill-down de `NotasDetalle` mostraba 91). Causa raíz:
+  el nodo debe usar `Append or Update Row` con **Column to match on = `clave_registro`**.
+  Mitigación en código: `load_materias()` / `load_notas_detalle()` / `load_notas()` ahora
+  hacen `drop_duplicates` por la llave única del feed, así un re-append no rompe los conteos.
 
 > Nota: la lista de `program_id` monitoreados coincide entre las cuatro queries, así que
 > el alcance de programas es consistente.

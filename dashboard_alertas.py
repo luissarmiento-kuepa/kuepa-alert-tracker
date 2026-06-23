@@ -791,15 +791,27 @@ def render_reprobacion():
         _chart_help("Cada barra es el <b>nº de estudiantes distintos</b> con al menos un módulo "
                     "reprobado en ese programa. Sirve para repartir la carga de gestión entre "
                     "coordinaciones. <b>Clic en una barra</b> → ver y descargar sus estudiantes.")
+    # Buckets EXCLUYENTES por nº exacto de módulos reprobados (un estudiante cae en uno solo).
+    SEV_LABELS = ['1', '2', '3', '4', '5', '>5']
+    SEV_COLORS = ['#F5C518', '#F5A623', '#FD7A1E', '#FD531E', '#C0392B', '#7B0000']
+    def _sev_bucket_de(n):  # nº de módulos → etiqueta de columna
+        return '>5' if n >= 6 else str(int(n))
     with g2:
         st.markdown("<div class='section-title'>¿Qué tan grave? — Módulos reprobados por estudiante</div>", unsafe_allow_html=True)
-        rep = d[d['modulos_reprobados'] > 0]['modulos_reprobados']
-        buckets = pd.cut(rep, bins=[0, 1, 2, 3, 100], labels=['1', '2', '3', '4+'])
-        dist = buckets.value_counts().reindex(['1', '2', '3', '4+']).fillna(0).astype(int)
-        bucket_colors = ['#F5A623', '#FD531E', '#C0392B', '#7B0000']
+        # Filtro de programa propio de esta gráfica (p. ej. Flex / Online / Onsite).
+        _afect = d[d['modulos_reprobados'] > 0]
+        _progs = sorted(_afect['program_name'].dropna().unique())
+        def _short_prog(p):  # etiqueta corta para el radio
+            return (p.replace('Bachillerato', '').replace('Plus', '').strip() or p) if p != 'Todos' else 'Todos'
+        sev_prog = st.radio("Programa", ['Todos'] + _progs, horizontal=True,
+                            format_func=_short_prog, key="rep_sev_prog", label_visibility="collapsed")
+        sev_base = _afect if sev_prog == 'Todos' else _afect[_afect['program_name'] == sev_prog]
+        rep = sev_base['modulos_reprobados']
+        buckets = rep.map(_sev_bucket_de)
+        dist = buckets.value_counts().reindex(SEV_LABELS).fillna(0).astype(int)
         fig_b = go.Figure(go.Bar(
-            x=dist.index, y=dist.values,
-            marker=dict(color=bucket_colors, line=dict(width=0)),
+            x=SEV_LABELS, y=dist.values,
+            marker=dict(color=SEV_COLORS, line=dict(width=0)),
             text=dist.values, textposition='outside',
             textfont=dict(color='#FAFAFA', size=13, family='Barlow'),
             hovertemplate="<b>%{x} módulo(s) reprobado(s)</b><br>%{y} estudiantes<extra></extra>",
@@ -808,13 +820,14 @@ def render_reprobacion():
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#C0C0C0", family="Barlow"),
             height=max(330, 330), margin=dict(l=10, r=10, t=20, b=20),
-            xaxis=dict(title="Módulos reprobados", **AXIS), yaxis=dict(**AXIS),
+            xaxis=dict(title="Módulos reprobados", type='category', **AXIS), yaxis=dict(**AXIS),
         )
         sev_event = st.plotly_chart(fig_b, use_container_width=True,
                                     on_select="rerun", key="rep_sev_sel")
         multi_rep = int((rep >= 3).sum())
-        _chart_help(f"Distribución de la <b>severidad</b>. Los <b>{multi_rep}</b> estudiantes con "
-                    f"3+ módulos reprobados son los más cerca de la deserción: priorízalos. "
+        _chart_help(f"Cada columna cuenta estudiantes con <b>exactamente</b> ese nº de módulos "
+                    f"reprobados — <b>no se solapan</b> (\"&gt;5\" = 6 o más). De este corte, "
+                    f"<b>{multi_rep}</b> tienen 3+ módulos: los más cerca de la deserción. "
                     f"<b>Haz clic en una barra</b> para ver y descargar quiénes son.")
     st.divider()
 
@@ -837,22 +850,27 @@ def render_reprobacion():
     base = d[d['modulos_reprobados'] > 0]
     _mask = pd.Series(True, index=base.index)
     _titulo, _suf = [], []
-    if _sel_progs:
-        _mask &= base['program_name'].isin(_sel_progs)
-        _titulo.append(", ".join(_sel_progs))
-        _suf.append("_".join(_sel_progs)[:30].replace(' ', '_'))
+    # Programa: un clic en la barra de programa manda; si no, hereda el filtro del radio
+    # de severidad (Flex/Online/Onsite). Así el detalle siempre cuadra con lo que se ve.
+    _progs_filt = _sel_progs if _sel_progs else ([sev_prog] if sev_prog != 'Todos' else [])
+    if _progs_filt:
+        _mask &= base['program_name'].isin(_progs_filt)
+        _titulo.append(", ".join(_short_prog(p) for p in _progs_filt))
+        _suf.append("_".join(_progs_filt)[:30].replace(' ', '_'))
     _sev_map = {
         '1': base['modulos_reprobados'] == 1,
         '2': base['modulos_reprobados'] == 2,
         '3': base['modulos_reprobados'] == 3,
-        '4+': base['modulos_reprobados'] >= 4,
+        '4': base['modulos_reprobados'] == 4,
+        '5': base['modulos_reprobados'] == 5,
+        '>5': base['modulos_reprobados'] >= 6,
     }
     if _sev_bucket in _sev_map:
         _mask &= _sev_map[_sev_bucket]
         _titulo.append(f"{_sev_bucket} módulo(s) reprobado(s)")
         _suf.append(f"sev{_sev_bucket}")
 
-    if _sel_progs or _sev_bucket in _sev_map:
+    if _progs_filt or _sev_bucket in _sev_map:
         det = base[_mask]
         st.markdown(f"<div class='section-title' style='border-color:#F5A623'>👥 Estudiantes — "
                     f"{' · '.join(_titulo)} — {len(det)} estudiantes</div>", unsafe_allow_html=True)

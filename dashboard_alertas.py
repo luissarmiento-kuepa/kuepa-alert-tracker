@@ -852,36 +852,63 @@ def render_reprobacion():
                    "para desplegar y descargar la lista de esos estudiantes.")
         st.divider()
 
-    # ── 2. ¿QUÉ MATERIAS? Ranking de asignaturas más reprobadas (feed "Materias") ──
+    # ── 2. ¿QUÉ MATERIAS? Ranking de asignaturas más reprobadas ──
+    # Fuente del ranking = NotasDetalle (1 fila por estudiante × materia reprobada), el
+    # MISMO feed que alimenta el drill-down. Antes el ranking leía la pestaña "Materias",
+    # pero ese feed NO tiene nodo n8n que lo actualice → quedaba estancado y descuadraba
+    # con el drill-down (p.ej. 245 vs 91). Derivando ambos de NotasDetalle, siempre cuadran.
+    # El % de dificultad necesita "estudiantes_cursaron" (denominador), que solo trae el
+    # feed "Materias"; se muestra únicamente si esa pestaña está fresca (misma fecha).
     st.markdown("<div class='section-title' style='border-color:#C0392B'>Materias que más se reprueban</div>", unsafe_allow_html=True)
-    if df_mat_all.empty:
-        st.info("ℹ️ Aún no hay datos a nivel de materia. Falta poblar la pestaña **'Materias'** del "
-                "Sheet con la query `queries/materias_reprobadas.sql` (nodo n8n nuevo). "
+    if df_det_all.empty:
+        st.info("ℹ️ Aún no hay datos a nivel de materia. Falta poblar la pestaña **'NotasDetalle'** del "
+                "Sheet con la query `queries/notas_detalle_materia.sql`. "
                 "Mientras tanto, arriba ya ves el desempeño resumido por estudiante.")
     else:
-        f_mat = _snapshot_fecha(df_mat_all, fecha_principal)
-        m = df_mat_all[df_mat_all['fecha_informe'] == f_mat].copy()
-        if programas and 'program_name' in m.columns:
-            m = m[m['program_name'].isin(programas)]
+        f_det = _snapshot_fecha(df_det_all, fecha_principal)
+        dd_base = df_det_all[df_det_all['fecha_informe'] == f_det].copy()
+        if programas and 'program_name' in dd_base.columns:
+            dd_base = dd_base[dd_base['program_name'].isin(programas)]
         # La modalidad se elige en el encabezado de la pestaña y filtra también el ranking.
-        if mod_sel and 'modalidad' in m.columns:
-            m = m[m['modalidad'] == mod_sel]
-        if len(m) == 0:
+        if mod_sel and 'modalidad' in dd_base.columns:
+            dd_base = dd_base[dd_base['modalidad'] == mod_sel]
+        if 'materia' in dd_base.columns:
+            dd_base['materia'] = dd_base['materia'].astype(str).str.strip()
+        if len(dd_base) == 0:
             st.warning(f"No hay materias de {etiqueta_mod} para los filtros seleccionados.")
         else:
-            if f_mat != fecha_principal:
-                st.caption(f"📅 Snapshot de materias más cercano: {f_mat} (no hay corrida del {fecha_principal})")
+            if f_det != fecha_principal:
+                st.caption(f"📅 Snapshot de materias más cercano: {f_det} (no hay corrida del {fecha_principal})")
 
-            # Re-agregamos por materia sumando los programas seleccionados (dentro de la modalidad)
-            agg = (m.groupby('materia')
-                   .agg(reprobaron=('estudiantes_reprobaron', 'sum'),
-                        cursaron=('estudiantes_cursaron', 'sum'),
-                        nota=('nota_promedio', 'mean'))
+            # Ranking por VOLUMEN: nº de estudiantes distintos que reprobaron cada materia.
+            agg = (dd_base.groupby('materia')
+                   .agg(reprobaron=('user_incremental', 'nunique'),
+                        nota=('nota_materia', 'mean'))
                    .reset_index())
-            agg['pct'] = (agg['reprobaron'] / agg['cursaron'] * 100).round(1)
 
-            cA, cB = st.columns(2)
-            with cA:
+            # % DIFICULTAD: requiere el denominador (cuántos la cursaron), que solo está en
+            # el feed "Materias". Se usa SOLO si hay un snapshot de Materias en la misma fecha.
+            cursaron_map = None
+            if not df_mat_all.empty:
+                m = df_mat_all[df_mat_all['fecha_informe'] == f_det].copy()
+                if programas and 'program_name' in m.columns:
+                    m = m[m['program_name'].isin(programas)]
+                if mod_sel and 'modalidad' in m.columns:
+                    m = m[m['modalidad'] == mod_sel]
+                if len(m) > 0 and 'estudiantes_cursaron' in m.columns and 'materia' in m.columns:
+                    m['materia'] = m['materia'].astype(str).str.strip()
+                    cursaron_map = m.groupby('materia')['estudiantes_cursaron'].sum()
+            if cursaron_map is not None:
+                agg['cursaron'] = agg['materia'].map(cursaron_map)
+                agg['pct'] = (agg['reprobaron'] / agg['cursaron'] * 100).round(1)
+            else:
+                agg['cursaron'] = pd.NA
+                agg['pct'] = pd.NA
+            tiene_pct = cursaron_map is not None and agg['pct'].notna().any()
+
+            _cols = st.columns(2) if tiene_pct else [st.container()]
+            mat_p_event = None
+            with _cols[0]:
                 st.markdown("<p style='color:#FAFAFA;font-weight:700;font-size:0.95rem;margin:0 0 .3rem'>Por volumen — más estudiantes reprobados</p>", unsafe_allow_html=True)
                 top_v = agg.sort_values('reprobaron').tail(12)
                 fig_v = go.Figure(go.Bar(
@@ -889,8 +916,7 @@ def render_reprobacion():
                     marker=dict(color="#C0392B", line=dict(width=0)),
                     text=top_v['reprobaron'], textposition='outside',
                     textfont=dict(color='#FAFAFA', size=12, family='Barlow'),
-                    customdata=top_v[['pct', 'cursaron']].values,
-                    hovertemplate="<b>%{y}</b><br>%{x} reprobados de %{customdata[1]} (%{customdata[0]}%)<extra></extra>",
+                    hovertemplate="<b>%{y}</b><br>%{x} estudiantes la reprobaron<extra></extra>",
                 ))
                 fig_v.update_layout(
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -903,30 +929,36 @@ def render_reprobacion():
                 _chart_help("<b>Cuántos</b> estudiantes cargan cada materia. Es la cola de trabajo: "
                             "atender estas materias descarga al mayor número de alumnos. "
                             "<b>Clic en una barra</b> → quiénes la reprobaron.")
-            with cB:
-                st.markdown("<p style='color:#FAFAFA;font-weight:700;font-size:0.95rem;margin:0 0 .3rem'>Por dificultad — mayor % de reprobación</p>", unsafe_allow_html=True)
-                # % solo es comparable con masa suficiente: pedimos ≥5 que la cursaron
-                top_p = agg[agg['cursaron'] >= 5].sort_values('pct').tail(12)
-                fig_p = go.Figure(go.Bar(
-                    y=top_p['materia'], x=top_p['pct'], orientation='h',
-                    marker=dict(color=top_p['pct'],
-                                colorscale=[[0, '#F5A623'], [0.5, '#FD531E'], [1, '#7B0000']], line=dict(width=0)),
-                    text=top_p['pct'].map(lambda v: f"{v:.0f}%"), textposition='outside',
-                    textfont=dict(color='#FAFAFA', size=12, family='Barlow'),
-                    customdata=top_p[['reprobaron', 'cursaron']].values,
-                    hovertemplate="<b>%{y}</b><br>%{x}% reprueban (%{customdata[0]} de %{customdata[1]})<extra></extra>",
-                ))
-                fig_p.update_layout(
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color="#C0C0C0", family="Barlow"),
-                    height=max(380, len(top_p) * 30), margin=dict(l=10, r=50, t=10, b=20),
-                    xaxis=dict(ticksuffix="%", **AXIS), yaxis=dict(**AXIS),
-                )
-                mat_p_event = st.plotly_chart(fig_p, use_container_width=True,
-                                              on_select="rerun", key="mat_dif_sel")
-                _chart_help("<b>Qué tan dura</b> es cada materia (% de quienes la cursan y la reprueban, "
-                            "mín. 5 estudiantes). Señala dónde revisar contenido, evaluación o apoyo docente. "
-                            "<b>Clic en una barra</b> → quiénes la reprobaron.")
+            if tiene_pct:
+                with _cols[1]:
+                    st.markdown("<p style='color:#FAFAFA;font-weight:700;font-size:0.95rem;margin:0 0 .3rem'>Por dificultad — mayor % de reprobación</p>", unsafe_allow_html=True)
+                    # % solo es comparable con masa suficiente: pedimos ≥5 que la cursaron
+                    top_p = agg[agg['cursaron'] >= 5].sort_values('pct').tail(12)
+                    fig_p = go.Figure(go.Bar(
+                        y=top_p['materia'], x=top_p['pct'], orientation='h',
+                        marker=dict(color=top_p['pct'],
+                                    colorscale=[[0, '#F5A623'], [0.5, '#FD531E'], [1, '#7B0000']], line=dict(width=0)),
+                        text=top_p['pct'].map(lambda v: f"{v:.0f}%"), textposition='outside',
+                        textfont=dict(color='#FAFAFA', size=12, family='Barlow'),
+                        customdata=top_p[['reprobaron', 'cursaron']].values,
+                        hovertemplate="<b>%{y}</b><br>%{x}% reprueban (%{customdata[0]} de %{customdata[1]})<extra></extra>",
+                    ))
+                    fig_p.update_layout(
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#C0C0C0", family="Barlow"),
+                        height=max(380, len(top_p) * 30), margin=dict(l=10, r=50, t=10, b=20),
+                        xaxis=dict(ticksuffix="%", **AXIS), yaxis=dict(**AXIS),
+                    )
+                    mat_p_event = st.plotly_chart(fig_p, use_container_width=True,
+                                                  on_select="rerun", key="mat_dif_sel")
+                    _chart_help("<b>Qué tan dura</b> es cada materia (% de quienes la cursan y la reprueban, "
+                                "mín. 5 estudiantes). Señala dónde revisar contenido, evaluación o apoyo docente. "
+                                "<b>Clic en una barra</b> → quiénes la reprobaron.")
+            else:
+                st.caption("ℹ️ El ranking **por dificultad (% de reprobación)** necesita saber cuántos "
+                           "estudiantes cursaron cada materia — dato que solo trae la pestaña **'Materias'**, "
+                           "que aún no tiene nodo n8n que la actualice. Por ahora se muestra solo el ranking "
+                           "por volumen (estudiantes que reprobaron), que sí está al día.")
 
             # ── Drill-down de materias: ¿QUIÉNES reprobaron la materia que se clicó? ──
             sel_mats = []
@@ -939,48 +971,29 @@ def render_reprobacion():
             if sel_mats:
                 st.markdown("<div class='section-title' style='border-color:#F5A623'>👥 Quiénes reprobaron — "
                             + ", ".join(sel_mats) + "</div>", unsafe_allow_html=True)
-                if df_det_all.empty:
-                    st.info("ℹ️ Falta poblar la pestaña **'NotasDetalle'** (query "
-                            "`queries/notas_detalle_materia.sql`, nodo n8n nuevo) para ver la lista "
-                            "de estudiantes por materia.")
+                # El drill-down usa EXACTAMENTE la misma base filtrada que el ranking
+                # (dd_base = NotasDetalle del snapshot, con modalidad y programas ya aplicados),
+                # así la lista detallada cuadra siempre con el conteo de la barra clicada.
+                sel_mats_clean = [s.strip() for s in sel_mats]
+                dd = dd_base[dd_base['materia'].isin(sel_mats_clean)]
+                if len(dd) == 0:
+                    st.error(f"❌ No se encontraron estudiantes. Debug: buscando {sel_mats} en {len(dd_base)} registros.")
+                    if 'materia' in dd_base.columns:
+                        st.caption(f"Materias disponibles: {dd_base['materia'].unique()[:5].tolist()}")
                 else:
-                    # 🔑 ALINEAR SNAPSHOT: usar la MISMA fecha que usó para la gráfica de materias
-                    # Esto asegura que gráfica y tabla muestren datos de la misma ejecución
-                    f_det = f_mat  # Usa la fecha de materias, no _snapshot_fecha(df_det_all, ...)
-                    dd = df_det_all[df_det_all['fecha_informe'] == f_det].copy()
-                    if len(dd) == 0:
-                        # Si no hay detalle en esa fecha, intenta buscar la más cercana
-                        f_det = _snapshot_fecha(df_det_all, fecha_principal)
-                        dd = df_det_all[df_det_all['fecha_informe'] == f_det].copy()
-                    # 🔑 IMPORTANT: NO filtrar por programas en el drill-down si la gráfica sumó múltiples.
-                    # La gráfica muestra la suma total de esa materia DENTRO de los filtros aplicados.
-                    # El drill-down debe mostrar TODOS los estudiantes que reprobaron esa materia,
-                    # independiente del programa (porque cada estudiante aparece una sola vez en NotasDetalle).
-                    if mod_sel and 'modalidad' in dd.columns:
-                        dd = dd[dd['modalidad'] == mod_sel]
-                    # ⚠️ Filtrar por materias: usar strip() para eliminar espacios
-                    if 'materia' in dd.columns:
-                        dd['materia'] = dd['materia'].astype(str).str.strip()
-                        sel_mats_clean = [s.strip() for s in sel_mats]
-                        dd = dd[dd['materia'].isin(sel_mats_clean)]
-                    if len(dd) == 0:
-                        st.error(f"❌ No se encontraron estudiantes. Debug: buscando {sel_mats} en {len(df_det_all)} registros.")
-                        if not df_det_all.empty and 'materia' in df_det_all.columns:
-                            st.caption(f"Materias disponibles: {df_det_all['materia'].unique()[:5].tolist()}")
-                    else:
-                        cols_d = [c for c in ['user_incremental', 'user_full_name', 'program_name',
-                                              'materia', 'nota_materia'] if c in dd.columns]
-                        dd_show = (dd[cols_d].sort_values(['materia', 'program_name', 'nota_materia']).reset_index(drop=True)
-                                   .rename(columns={
-                                       'user_incremental': 'ID', 'user_full_name': 'Estudiante',
-                                       'program_name': 'Programa', 'materia': 'Materia', 'nota_materia': 'Nota',
-                                   }))
-                        st.caption(f"📅 Datos del {f_det} · {len(dd_show)} estudiantes")
-                        st.dataframe(dd_show, use_container_width=True, height=320)
-                        _nom = "_".join(sel_mats)[:40].replace(' ', '_').replace('/', '-')
-                        st.download_button(
-                            "⬇️ Descargar estudiantes (CSV)", dd_show.to_csv(index=False).encode('utf-8-sig'),
-                            file_name=f"reprobaron_{_nom}_{fecha_principal}.csv", mime="text/csv", key="dl_det_mat")
+                    cols_d = [c for c in ['user_incremental', 'user_full_name', 'program_name',
+                                          'materia', 'nota_materia'] if c in dd.columns]
+                    dd_show = (dd[cols_d].sort_values(['materia', 'program_name', 'nota_materia']).reset_index(drop=True)
+                               .rename(columns={
+                                   'user_incremental': 'ID', 'user_full_name': 'Estudiante',
+                                   'program_name': 'Programa', 'materia': 'Materia', 'nota_materia': 'Nota',
+                               }))
+                    st.caption(f"📅 Datos del {f_det} · {len(dd_show)} estudiantes")
+                    st.dataframe(dd_show, use_container_width=True, height=320)
+                    _nom = "_".join(sel_mats)[:40].replace(' ', '_').replace('/', '-')
+                    st.download_button(
+                        "⬇️ Descargar estudiantes (CSV)", dd_show.to_csv(index=False).encode('utf-8-sig'),
+                        file_name=f"reprobaron_{_nom}_{fecha_principal}.csv", mime="text/csv", key="dl_det_mat")
                 st.divider()
             else:
                 st.caption("👆 Tip: haz clic en una barra de materia (cualquiera de las dos gráficas) "
@@ -988,10 +1001,13 @@ def render_reprobacion():
 
             st.markdown("<div class='section-title'>Detalle por materia</div>", unsafe_allow_html=True)
             tabla = agg.sort_values('reprobaron', ascending=False).reset_index(drop=True)
-            tabla['nota'] = tabla['nota'].round(2)
-            tabla_mat = tabla[['materia', 'cursaron', 'reprobaron', 'pct', 'nota']].rename(columns={
+            tabla['nota'] = pd.to_numeric(tabla['nota'], errors='coerce').round(2)
+            # "La cursaron" / "% Reprobación" solo si hay denominador fresco (feed Materias).
+            base_cols = ['materia', 'cursaron', 'reprobaron', 'pct', 'nota'] if tiene_pct \
+                else ['materia', 'reprobaron', 'nota']
+            tabla_mat = tabla[base_cols].rename(columns={
                 'materia': 'Materia', 'cursaron': 'La cursaron', 'reprobaron': 'La reprobaron',
-                'pct': '% Reprobación', 'nota': 'Nota Prom.',
+                'pct': '% Reprobación', 'nota': 'Nota prom. (reprob.)',
             })
             st.dataframe(tabla_mat, use_container_width=True, height=340)
             _suf = f"_{mod_sel}" if mod_sel else ""

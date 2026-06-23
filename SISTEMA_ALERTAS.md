@@ -156,13 +156,23 @@ SQL en `queries/materias_reprobadas.sql`, pestaña destino `Materias`. Salida (1
   sidebar siga funcionando; los % se re-derivan de los conteos en el front.
 - `HAVING estudiantes_reprobaron > 0`: solo entran al ranking materias con ≥1 reprobada.
 - **"Activo" / recuperaciones / "cursado":** idéntica definición que `Notas` (coherencia).
-- **⚠️ Riesgo de duplicados (2026-06-23):** el dashboard **suma** `estudiantes_reprobaron`
-  por programa para armar el ranking. Si el nodo n8n appendea la misma corrida más de una
-  vez, las filas repetidas inflan la suma (síntoma observado: el ranking marcaba 245
-  reprobados en una materia mientras el drill-down de `NotasDetalle` mostraba 91). Causa raíz:
-  el nodo debe usar `Append or Update Row` con **Column to match on = `clave_registro`**.
-  Mitigación en código: `load_materias()` / `load_notas_detalle()` / `load_notas()` ahora
-  hacen `drop_duplicates` por la llave única del feed, así un re-append no rompe los conteos.
+- **🔧 CAMBIO DE FUENTE DEL RANKING (2026-06-23):** se descubrió que **nunca existió un nodo
+  n8n `Materias`** (el workflow solo tiene Asistencia, Login/Cartera, Notas y NotasDetalle).
+  La pestaña `Materias` tenía datos viejos/estancados → el ranking marcaba 245 reprobados en
+  una materia mientras el drill-down (`NotasDetalle`, vivo) mostraba 91. **Solución aplicada en
+  el dashboard:** el ranking de materias (`render_reprobacion`, bloque "Materias que más se
+  reprueban") ahora se **deriva de `NotasDetalle`** — la misma fuente del drill-down — así el
+  conteo de cada barra y la lista de "quiénes reprobaron" **cuadran por construcción**.
+  - **"Por volumen"** = `nunique(user_incremental)` por materia sobre NotasDetalle. Vivo.
+  - **"Por dificultad" (% reprobación)** necesita el denominador `estudiantes_cursaron`, que
+    solo trae el feed `Materias`. Se muestra **solo si** existe un snapshot de `Materias` en la
+    misma fecha; si no, se oculta esa gráfica con un aviso y queda solo el ranking por volumen.
+  - Ranking y drill-down ahora aplican **los mismos filtros** (fecha + modalidad + programas).
+- **Para reactivar "Por dificultad":** crear el nodo n8n `Materias` (SQL en
+  `queries/materias_reprobadas.sql`, `Append or Update Row`, match en `clave_registro`).
+  Mientras tanto el feed es opcional, no crítico.
+- **Defensa anti-duplicados:** `load_materias()` / `load_notas_detalle()` / `load_notas()`
+  hacen `drop_duplicates` por la llave única del feed, por si un nodo re-appendea una corrida.
 
 > Nota: la lista de `program_id` monitoreados coincide entre las cuatro queries, así que
 > el alcance de programas es consistente.

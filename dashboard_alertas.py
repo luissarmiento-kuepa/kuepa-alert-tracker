@@ -940,9 +940,15 @@ def render_reprobacion():
                     # independiente del programa (porque cada estudiante aparece una sola vez en NotasDetalle).
                     if mod_sel and 'modalidad' in dd.columns:
                         dd = dd[dd['modalidad'] == mod_sel]
-                    dd = dd[dd['materia'].isin(sel_mats)]
+                    # ⚠️ Filtrar por materias: usar strip() para eliminar espacios
+                    if 'materia' in dd.columns:
+                        dd['materia'] = dd['materia'].astype(str).str.strip()
+                        sel_mats_clean = [s.strip() for s in sel_mats]
+                        dd = dd[dd['materia'].isin(sel_mats_clean)]
                     if len(dd) == 0:
-                        st.warning("No hay estudiantes para esa materia con los filtros actuales.")
+                        st.error(f"❌ No se encontraron estudiantes. Debug: buscando {sel_mats} en {len(df_det_all)} registros.")
+                        if not df_det_all.empty and 'materia' in df_det_all.columns:
+                            st.caption(f"Materias disponibles: {df_det_all['materia'].unique()[:5].tolist()}")
                     else:
                         cols_d = [c for c in ['user_incremental', 'user_full_name', 'program_name',
                                               'materia', 'nota_materia'] if c in dd.columns]

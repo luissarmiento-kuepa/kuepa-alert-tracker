@@ -160,6 +160,23 @@ SQL en `queries/materias_reprobadas.sql`, pestaña destino `Materias`. Salida (1
 > Nota: la lista de `program_id` monitoreados coincide entre las cuatro queries, así que
 > el alcance de programas es consistente.
 
+### NotasDetalle (drill-down estudiante × materia) — query lista
+Datasets `DVKU_SIS` + `DSKU_SIS` (mismas CTEs que `Notas` y `Materias`, solo cambia el grano).
+SQL en `queries/notas_detalle_materia.sql`, pestaña destino `NotasDetalle`. Salida (1 fila por
+**estudiante × materia reprobada**): `user_incremental`, `user_full_name`, `modalidad`,
+`program_name`, `materia`, `nota_materia`, `fecha_informe`, `clave_registro` 
+(= `estudiante|materia|fecha`, llave única n8n).
+- **Para qué:** responde "**¿quiénes reprobaron ESTA materia?**" El dashboard habilita un drill-down
+  desde el ranking de materias: al clicar una materia, muestra todos los estudiantes que la reprobaron
+  y su nota exacta.
+- **Grano:** 1 fila por estudiante × materia. Volumen controlado: `WHERE materia_aprobada = 0`
+  (solo reprobadas), así el Sheet no se infla con snapshots semanales.
+- **"Activo" / "cursado" / "programa vigente":** idéntica definición que `Notas` (coherencia).
+- **Recuperaciones:** si el estudiante recuperó una materia, sale reprobada = 0 y **no entra** en 
+  este feed (solo entran las NO aprobadas). Como el snapshot de cada semana muestra el estado vigente,
+  una materia que se recuperó simplemente desaparece de `NotasDetalle` la semana siguiente → **el
+  usuario ve automáticamente quién mejoró** sin extra lógica de comparativa.
+
 ---
 
 ## 4. Diseño de la interfaz
@@ -190,6 +207,7 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
 - [ ] ⏸️ Nodo `Asistencia`: EN PAUSA (feed v2 listo, pero la pestaña está fuera del aire — ver §4).
 - [ ] Nodo n8n + pestaña `Notas` poblándose semanalmente (SQL en `queries/notas_reprobacion.sql`).
 - [ ] **Nodo n8n + pestaña `Materias`** poblándose semanalmente (SQL en `queries/materias_reprobadas.sql`).
+- [x] 🔄 **Nodo n8n + pestaña `NotasDetalle`** poblándose semanalmente (SQL en `queries/notas_detalle_materia.sql`) — **ACTIVO, 3370 filas pobladas (2026-06-23)**.
 - [ ] Confirmar que los nodos activos corren en la misma ejecución (fechas alineadas).
 
 ### Fase 2 — Dashboard (código)
@@ -209,6 +227,29 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
 Notas de implementación: el bloque de contenido original quedó indentado +4 dentro de
 `with tab0:` (sin reescribirlo). Las pestañas nuevas filtran por `fecha_principal` y por el
 filtro de `programas` del sidebar. El gestor para Riesgo 360 sale de `df_principal` (Hoja 1).
+
+---
+
+## 6.5. Setup: Pestaña "NotasDetalle" + Nodo n8n
+
+### Estado actual (2026-06-23) ✅ OPERATIVO
+- ✅ SQL en `queries/notas_detalle_materia.sql` — **listo**.
+- ✅ Loader `load_notas_detalle()` en `dashboard_alertas.py` (L514–527) — **listo**.
+- ✅ Bloque drill-down en `render_reprobacion()` (L924–953) — **operativo**.
+- ✅ Pestaña "NotasDetalle" en Sheet — **POBLADA (3370 filas, 2026-06-23)**.
+- ✅ Nodo n8n (BQ Query + Sheets) — **EJECUTADO Y FUNCIONANDO**.
+
+### Validación
+
+Cuando el dashboard cargue en producción (con credenciales GCP):
+1. Ve a pestaña 📕 **Reprobación**.
+2. Gráfica "Por volumen" o "Por dificultad" → clic en una materia.
+3. **Debe desplegar tabla:** "Quiénes reprobaron — [nombre materia]".
+4. Tabla mostrará estudiantes + nota exacta por materia.
+
+### Pasos para activar
+
+Completado. El workflow ejecuta semanalmente y popula 3370 filas cada ejecución.
 
 ---
 

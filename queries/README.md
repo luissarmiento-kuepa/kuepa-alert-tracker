@@ -9,11 +9,14 @@ workflow semanal de n8n, que escribe el resultado a una pestaña del Google Shee
 | `asistencia_ausentismo.sql` | `Asistencia` | ⏸️ En revisión — pestaña FUERA DEL AIRE en el dashboard | `DVKU_SIS` |
 | `notas_reprobacion.sql` | `Notas` | Lista para nodo nuevo (resumen por estudiante) | `DVKU_SIS` + `DSKU_SIS` |
 | `materias_reprobadas.sql` | `Materias` | Lista para nodo nuevo (ranking por materia) | `DVKU_SIS` + `DSKU_SIS` |
+| `notas_detalle_materia.sql` | `NotasDetalle` | Lista para nodo nuevo (detalle estudiante×materia reprobada) | `DVKU_SIS` + `DSKU_SIS` |
 
-`Notas` y `Materias` salen de las **mismas CTEs** (estudiantes activos + estado por materia),
-solo cambia el grano del SELECT final: `Notas` = 1 fila por estudiante; `Materias` = 1 fila
-por programa × materia (para "qué materias se reprueban más"). En n8n: `clave_registro` como
-columna de match (`Append or Update Row`) — en `Materias` es `programa|materia|fecha`.
+`Notas`, `Materias` y `NotasDetalle` salen de las **mismas CTEs** (estudiantes activos +
+estado por materia), solo cambia el grano del SELECT final: `Notas` = 1 fila por estudiante;
+`Materias` = 1 fila por programa × materia (ranking); `NotasDetalle` = 1 fila por estudiante ×
+materia **reprobada** (drill-down "quiénes reprobaron X"). En n8n: `clave_registro` como
+columna de match (`Append or Update Row`) — `Materias` = `programa|materia|fecha`,
+`NotasDetalle` = `estudiante|materia|fecha`.
 
 **Reglas:**
 - Los nodos deben correr en la **misma ejecución semanal** para que las

@@ -510,9 +510,24 @@ def load_materias():
     df['fecha_informe'] = _parse_fecha_series(df['fecha_informe'])
     return df.dropna(subset=['fecha_informe'])
 
+@st.cache_data(ttl=300)
+def load_notas_detalle():
+    """Detalle estudiante × materia reprobada (para el drill-down de materias)."""
+    try:
+        df = _get_worksheet_df("NotasDetalle")
+    except Exception:
+        return pd.DataFrame()
+    if df.empty or 'fecha_informe' not in df.columns:
+        return pd.DataFrame()
+    if 'nota_materia' in df.columns:
+        df['nota_materia'] = pd.to_numeric(df['nota_materia'].astype(str).str.replace(',', '.', regex=False), errors='coerce')
+    df['fecha_informe'] = _parse_fecha_series(df['fecha_informe'])
+    return df.dropna(subset=['fecha_informe'])
+
 df_asis_all  = load_asistencia()
 df_notas_all = load_notas()
 df_mat_all   = load_materias()
+df_det_all   = load_notas_detalle()
 
 # Paleta para niveles de asistencia
 ASIS_ORDER  = ['🔴 CRÍTICO', '🟡 ALERTA', '🟠 BAJO', '🟢 NORMAL']
@@ -865,9 +880,11 @@ def render_reprobacion():
                     height=max(380, len(top_v) * 30), margin=dict(l=10, r=44, t=10, b=20),
                     xaxis=dict(**AXIS), yaxis=dict(**AXIS),
                 )
-                st.plotly_chart(fig_v, use_container_width=True)
+                mat_v_event = st.plotly_chart(fig_v, use_container_width=True,
+                                              on_select="rerun", key="mat_vol_sel")
                 _chart_help("<b>Cuántos</b> estudiantes cargan cada materia. Es la cola de trabajo: "
-                            "atender estas materias descarga al mayor número de alumnos.")
+                            "atender estas materias descarga al mayor número de alumnos. "
+                            "<b>Clic en una barra</b> → quiénes la reprobaron.")
             with cB:
                 st.markdown("<p style='color:#FAFAFA;font-weight:700;font-size:0.95rem;margin:0 0 .3rem'>Por dificultad — mayor % de reprobación</p>", unsafe_allow_html=True)
                 # % solo es comparable con masa suficiente: pedimos ≥5 que la cursaron
@@ -887,9 +904,54 @@ def render_reprobacion():
                     height=max(380, len(top_p) * 30), margin=dict(l=10, r=50, t=10, b=20),
                     xaxis=dict(ticksuffix="%", **AXIS), yaxis=dict(**AXIS),
                 )
-                st.plotly_chart(fig_p, use_container_width=True)
+                mat_p_event = st.plotly_chart(fig_p, use_container_width=True,
+                                              on_select="rerun", key="mat_dif_sel")
                 _chart_help("<b>Qué tan dura</b> es cada materia (% de quienes la cursan y la reprueban, "
-                            "mín. 5 estudiantes). Señala dónde revisar contenido, evaluación o apoyo docente.")
+                            "mín. 5 estudiantes). Señala dónde revisar contenido, evaluación o apoyo docente. "
+                            "<b>Clic en una barra</b> → quiénes la reprobaron.")
+
+            # ── Drill-down de materias: ¿QUIÉNES reprobaron la materia que se clicó? ──
+            sel_mats = []
+            for _ev in (mat_v_event, mat_p_event):
+                try:
+                    sel_mats += [p.get('y') for p in _ev["selection"]["points"] if p.get('y')]
+                except Exception:
+                    pass
+            sel_mats = list(dict.fromkeys(sel_mats))  # dedup, conserva orden
+            if sel_mats:
+                st.markdown("<div class='section-title' style='border-color:#F5A623'>👥 Quiénes reprobaron — "
+                            + ", ".join(sel_mats) + "</div>", unsafe_allow_html=True)
+                if df_det_all.empty:
+                    st.info("ℹ️ Falta poblar la pestaña **'NotasDetalle'** (query "
+                            "`queries/notas_detalle_materia.sql`, nodo n8n nuevo) para ver la lista "
+                            "de estudiantes por materia.")
+                else:
+                    f_det = _snapshot_fecha(df_det_all, fecha_principal)
+                    dd = df_det_all[df_det_all['fecha_informe'] == f_det].copy()
+                    if programas and 'program_name' in dd.columns:
+                        dd = dd[dd['program_name'].isin(programas)]
+                    if mod_sel and 'modalidad' in dd.columns:
+                        dd = dd[dd['modalidad'] == mod_sel]
+                    dd = dd[dd['materia'].isin(sel_mats)]
+                    if len(dd) == 0:
+                        st.warning("No hay estudiantes para esa materia con los filtros actuales.")
+                    else:
+                        cols_d = [c for c in ['user_incremental', 'user_full_name', 'program_name',
+                                              'materia', 'nota_materia'] if c in dd.columns]
+                        dd_show = (dd[cols_d].sort_values(['materia', 'nota_materia']).reset_index(drop=True)
+                                   .rename(columns={
+                                       'user_incremental': 'ID', 'user_full_name': 'Estudiante',
+                                       'program_name': 'Programa', 'materia': 'Materia', 'nota_materia': 'Nota',
+                                   }))
+                        st.dataframe(dd_show, use_container_width=True, height=320)
+                        _nom = "_".join(sel_mats)[:40].replace(' ', '_').replace('/', '-')
+                        st.download_button(
+                            "⬇️ Descargar estudiantes (CSV)", dd_show.to_csv(index=False).encode('utf-8-sig'),
+                            file_name=f"reprobaron_{_nom}_{fecha_principal}.csv", mime="text/csv", key="dl_det_mat")
+                st.divider()
+            else:
+                st.caption("👆 Tip: haz clic en una barra de materia (cualquiera de las dos gráficas) "
+                           "para ver y descargar quiénes la reprobaron.")
 
             st.markdown("<div class='section-title'>Detalle por materia</div>", unsafe_allow_html=True)
             tabla = agg.sort_values('reprobaron', ascending=False).reset_index(drop=True)

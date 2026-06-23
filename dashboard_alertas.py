@@ -934,8 +934,10 @@ def render_reprobacion():
                         # Si no hay detalle en esa fecha, intenta buscar la más cercana
                         f_det = _snapshot_fecha(df_det_all, fecha_principal)
                         dd = df_det_all[df_det_all['fecha_informe'] == f_det].copy()
-                    if programas and 'program_name' in dd.columns:
-                        dd = dd[dd['program_name'].isin(programas)]
+                    # 🔑 IMPORTANT: NO filtrar por programas en el drill-down si la gráfica sumó múltiples.
+                    # La gráfica muestra la suma total de esa materia DENTRO de los filtros aplicados.
+                    # El drill-down debe mostrar TODOS los estudiantes que reprobaron esa materia,
+                    # independiente del programa (porque cada estudiante aparece una sola vez en NotasDetalle).
                     if mod_sel and 'modalidad' in dd.columns:
                         dd = dd[dd['modalidad'] == mod_sel]
                     dd = dd[dd['materia'].isin(sel_mats)]
@@ -944,7 +946,7 @@ def render_reprobacion():
                     else:
                         cols_d = [c for c in ['user_incremental', 'user_full_name', 'program_name',
                                               'materia', 'nota_materia'] if c in dd.columns]
-                        dd_show = (dd[cols_d].sort_values(['materia', 'nota_materia']).reset_index(drop=True)
+                        dd_show = (dd[cols_d].sort_values(['materia', 'program_name', 'nota_materia']).reset_index(drop=True)
                                    .rename(columns={
                                        'user_incremental': 'ID', 'user_full_name': 'Estudiante',
                                        'program_name': 'Programa', 'materia': 'Materia', 'nota_materia': 'Nota',

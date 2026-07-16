@@ -1156,6 +1156,113 @@ def render_riesgo360():
     st.markdown(f"<p style='color:#C0392B; font-size:0.8rem; font-weight:700'>⚠️ {len(multi)} estudiantes con señales combinadas de deserción</p>", unsafe_allow_html=True)
 
 # ============================================================
+# BUSCADOR DE ESTUDIANTE
+# ============================================================
+# Un solo input arriba (global). Cada pestaña renderiza su PROPIO panel con la alerta
+# que le corresponde, así el resultado se adapta a la sección donde esté el usuario.
+def _buscar_estudiante(q):
+    """Busca por ID exacto o por nombre parcial dentro del snapshot activo.
+    A propósito ignora los filtros del sidebar: si buscas a alguien por nombre,
+    debe aparecer aunque esté fuera del filtro de programa/gestor de turno."""
+    if not q or not str(q).strip():
+        return pd.DataFrame()
+    s = str(q).strip().lower()
+    b = df_hist[df_hist['fecha_informe'] == fecha_principal].drop_duplicates('user_incremental').copy()
+    ids  = b['user_incremental'].astype(str).str.strip().str.lower()
+    noms = b['user_full_name'].astype(str).str.lower()
+    return b[(ids == s) | noms.str.contains(s, regex=False, na=False)]
+
+def _panel_header(est):
+    st.markdown(
+        f"<div class='section-title' style='border-color:#F5A623'>🔎 {est['user_full_name']} "
+        f"— ID {est['user_incremental']}</div>", unsafe_allow_html=True)
+
+def _panel_conexion(est):
+    _panel_header(est)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🔌 Alerta de conexión", str(est.get('alert_type') or '—'))
+    c2.metric("💳 Estado financiero", str(est.get('financial_status_name') or '—'))
+    c3.metric("👤 Gestor", str(est.get('gestor_asignado') or '—'))
+    st.caption(f"🎓 {est.get('program_name', '—')}  ·  Etapa: {est.get('etapa', '—')}")
+    st.divider()
+
+def _panel_reprobacion(est):
+    _panel_header(est)
+    uid = str(est['user_incremental'])
+    if df_notas_all.empty:
+        st.info("Aún no hay datos de notas para mostrar."); st.divider(); return
+    dn = df_notas_all[df_notas_all['fecha_informe'] == _snapshot_fecha(df_notas_all, fecha_principal)].copy()
+    dn['user_incremental'] = dn['user_incremental'].astype(str)
+    r = dn[dn['user_incremental'] == uid]
+    if r.empty:
+        st.info(f"**{est['user_full_name']}** no aparece en el feed de notas de este snapshot "
+                f"(puede no estar en estado activo o no tener módulos cursados).")
+        st.divider(); return
+    r = r.iloc[0]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📚 Cursados", int(r['modulos_cursados']) if pd.notna(r['modulos_cursados']) else 0)
+    c2.metric("✅ Aprobados", int(r['modulos_aprobados']) if pd.notna(r['modulos_aprobados']) else 0)
+    c3.metric("📕 Reprobados", int(r['modulos_reprobados']) if pd.notna(r['modulos_reprobados']) else 0,
+              delta_color="inverse")
+    c4.metric("📊 Nota prom.", f"{r['nota_promedio']:.2f}" if pd.notna(r['nota_promedio']) else "—")
+    if not df_det_all.empty:
+        dd = df_det_all[df_det_all['fecha_informe'] == _snapshot_fecha(df_det_all, fecha_principal)].copy()
+        dd['user_incremental'] = dd['user_incremental'].astype(str)
+        mats = dd[dd['user_incremental'] == uid]
+        if not mats.empty:
+            st.markdown("<p style='color:#FAFAFA;font-weight:700;margin:.4rem 0 .2rem'>Materias reprobadas</p>",
+                        unsafe_allow_html=True)
+            st.dataframe(
+                mats[['materia', 'nota_materia']].rename(columns={'materia': 'Materia', 'nota_materia': 'Nota'})
+                .sort_values('Nota').reset_index(drop=True),
+                use_container_width=True, height=min(260, 60 + len(mats) * 36))
+    st.divider()
+
+def _panel_360(est):
+    _panel_header(est)
+    uid = str(est['user_incremental'])
+    sig_login  = bool(pd.notna(est.get('gravedad')) and est.get('gravedad') >= 3)
+    sig_mora   = str(est.get('financial_status_name')) in ['Mora avanzada', 'Baja por mora']
+    sig_reprob = False
+    if not df_notas_all.empty:
+        dn = df_notas_all[df_notas_all['fecha_informe'] == _snapshot_fecha(df_notas_all, fecha_principal)].copy()
+        dn['user_incremental'] = dn['user_incremental'].astype(str)
+        rr = dn[dn['user_incremental'] == uid]
+        if not rr.empty and pd.notna(rr.iloc[0]['modulos_reprobados']):
+            sig_reprob = bool(rr.iloc[0]['modulos_reprobados'] > 0)
+    activas = [('🔌 Login', sig_login), ('💳 Mora', sig_mora), ('📕 Reprobación', sig_reprob)]
+    n = sum(1 for _, v in activas if v)
+    color = {0: '#149852', 1: '#F5A623', 2: '#FD531E', 3: '#7B0000'}.get(n, '#7B0000')
+    c1, c2 = st.columns([1, 2.2])
+    c1.metric("🎯 Señales activas", n)
+    with c2:
+        chips = "".join(
+            f"<span style='background:{color if v else '#2E2E2E'};color:{'#FAFAFA' if v else '#656A71'};"
+            f"padding:4px 10px;border-radius:12px;margin-right:6px;font-size:.82rem;font-weight:700'>"
+            f"{'✓' if v else '·'} {nom}</span>" for nom, v in activas)
+        st.markdown(f"<div style='padding-top:1.4rem'>{chips}</div>", unsafe_allow_html=True)
+    if n >= 2:
+        st.markdown(f"<p style='color:#C0392B;font-weight:700;margin-top:.6rem'>⚠️ Riesgo múltiple: "
+                    f"{n} señales simultáneas — priorizar gestión.</p>", unsafe_allow_html=True)
+    st.caption(f"👤 Gestor: {est.get('gestor_asignado') or '—'}")
+    st.divider()
+
+st.markdown("<div class='section-title'>🔎 Buscar estudiante</div>", unsafe_allow_html=True)
+_q = st.text_input("Buscar estudiante", key="buscador", label_visibility="collapsed",
+                   placeholder="Escribe un nombre o un ID (p. ej. 29925 o \"Edwin Barón\") y mira su alerta en cada pestaña…")
+_matches = _buscar_estudiante(_q)
+est_sel = None
+if _q and str(_q).strip():
+    if len(_matches) == 0:
+        st.warning(f"Sin resultados para «{_q}» en el snapshot del {fecha_principal}.")
+    elif len(_matches) == 1:
+        est_sel = _matches.iloc[0]
+    else:
+        _etq = [f"{r['user_incremental']} — {r['user_full_name']}" for _, r in _matches.iterrows()]
+        _pick = st.selectbox(f"{len(_matches)} coincidencias — elige una:", _etq, key="buscador_pick")
+        est_sel = _matches.iloc[_etq.index(_pick)]
+
+# ============================================================
 # NAVEGACIÓN POR PESTAÑAS
 # ============================================================
 # 📉 Ausentismo: temporalmente FUERA DEL AIRE (feed v2 en revisión, evita confusión).
@@ -1165,9 +1272,13 @@ tab_360, tab_conexion, tab_reprob = st.tabs(
 )
 
 with tab_360:
+    if est_sel is not None:
+        _panel_360(est_sel)
     render_riesgo360()
 
 with tab_conexion:
+    if est_sel is not None:
+        _panel_conexion(est_sel)
     # ============================================================
     # MÉTRICAS
     # ============================================================
@@ -1764,4 +1875,6 @@ with tab_conexion:
             st.info("No hay gestores asignados en los datos de esta fecha.")
 
 with tab_reprob:
+    if est_sel is not None:
+        _panel_reprobacion(est_sel)
     render_reprobacion()

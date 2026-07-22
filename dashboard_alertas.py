@@ -358,6 +358,14 @@ def load_historical_data():
         return 'Otra'
     df['etapa'] = df['level_name'].apply(clasificar_etapa)
 
+    # Defensa anti-duplicados: el nodo n8n de Hoja 1 hace appendOrUpdate SIN columna de
+    # match, así que si el workflow corre dos veces el mismo día appendea todo el snapshot
+    # por duplicado (observado el 2026-07-22: 8060 filas = 2× 4030 estudiantes). 1 estudiante
+    # por fecha es lo correcto; dedup por (user_incremental, fecha_informe) evita el inflado.
+    dedup = [c for c in ['user_incremental', 'fecha_informe'] if c in df.columns]
+    if dedup:
+        df = df.drop_duplicates(subset=dedup)
+
     return df
 
 df_hist = load_historical_data()

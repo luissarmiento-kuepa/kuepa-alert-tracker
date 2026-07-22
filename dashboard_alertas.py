@@ -344,14 +344,19 @@ def load_historical_data():
     df['gravedad'] = df['alert_type'].map(ALERT_RANK).fillna(6)
     df['fin_rank'] = df['financial_status_name'].map(FIN_RANK).fillna(99)
 
-    # Categorizar etapa (Lectiva vs Productiva) para técnicos según level_name
+    # Categorizar etapa (Lectiva vs Productiva) para técnicos según level_name.
+    # La etapa productiva de técnicos NO dice "Productiva": viene por FASES
+    # ("Etapa 1_ Adaptación", "Etapa 2_Desempeño", "Etapa3_Proyección"). Se detecta por
+    # el nombre de la fase para que esos estudiantes aparezcan en Productiva (antes caían en 'Otra').
     LECTIVA_KEYWORDS = ['Introducción', 'Transición', 'Etapa Lectiva', 'Módulo 0', 'Fundamentación']
+    PRODUCTIVA_KEYWORDS = ['Productiva', 'Adaptación', 'Desempeño', 'Proyección']
     def clasificar_etapa(level):
         if pd.isna(level) or level == '':
             return 'Sin etapa'
         level_str = str(level)
-        if 'Productiva' in level_str:
-            return 'Productiva'
+        for kw in PRODUCTIVA_KEYWORDS:
+            if kw in level_str:
+                return 'Productiva'
         for kw in LECTIVA_KEYWORDS:
             if kw in level_str:
                 return 'Lectiva'

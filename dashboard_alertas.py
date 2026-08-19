@@ -298,46 +298,56 @@ FIN_COLORS = {
 }
 FIN_RANK = {v: i for i, v in enumerate(FIN_ORDER)}
 
-# ---- CARGA DE DATOS DESDE GOOGLE SHEETS ----
-SHEET_ID = "1hPWt0oBdbJTuIEbkFh1G9V1NDXh_ADKUt3OqJPocxaU"
+# ---- CARGA DE DATOS DESDE BIGQUERY ----
+# Migración (2026-08): el feed n8n dejó de escribir al Google Sheet (se saturaba) y ahora
+# inserta en BigQuery. El dashboard lee las tablas de SNAPSHOTS (historia), no la fuente viva.
+BQ_PROJECT = "kuepa-alertadashboard"
+BQ_DATASET = "kuepa-alertadashboard.alertas_academicas"
 CREDENTIALS_FILE = Path(__file__).parent / "credentials.json"
+
+@st.cache_resource
+def _bq_client():
+    # Streamlit Cloud: usa st.secrets | Local: usa credentials.json
+    from google.oauth2 import service_account
+    from google.cloud import bigquery
+    scopes = ["https://www.googleapis.com/auth/bigquery"]
+    try:
+        info = dict(st.secrets["gcp_service_account"])
+        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    except Exception:
+        creds = service_account.Credentials.from_service_account_file(str(CREDENTIALS_FILE), scopes=scopes)
+    return bigquery.Client(project=BQ_PROJECT, credentials=creds)
+
+def _bq_df(sql):
+    """Ejecuta una consulta y devuelve un DataFrame. Sin BQ Storage API (evita permisos extra)."""
+    return _bq_client().query(sql).result().to_dataframe(create_bqstorage_client=False)
 
 @st.cache_data(ttl=300)  # Refresca cada 5 minutos
 def load_historical_data():
-    # Streamlit Cloud: usa st.secrets | Local: usa credentials.json
+    # Une la historia completa (historico_2026_completo, hasta 2026-08-17) con el feed nuevo
+    # en curso (historico_alertas, desde 2026-08-19). Ambas se normalizan al mismo set de
+    # columnas; la fecha del snapshot se expone como fecha_informe (STRING ISO 'YYYY-MM-DD').
+    _cols = ["user_id", "user_incremental", "user_full_name", "contact_incremental",
+             "program_id", "program_name", "level_id", "level_name", "academic_status_id",
+             "academic_status_name", "financial_status_id", "financial_status_name",
+             "dias_desconexion", "alert_type", "selection_flag", "gestor_asignado"]
+    _sel = ", ".join(f"CAST({c} AS STRING) AS {c}" for c in _cols)
+    sql = f"""
+        SELECT {_sel}, CAST(snapshot AS STRING) AS fecha_informe
+        FROM `{BQ_DATASET}.historico_2026_completo`
+        UNION ALL
+        SELECT {_sel}, CAST(fecha_informe AS STRING) AS fecha_informe
+        FROM `{BQ_DATASET}.historico_alertas`
+    """
     try:
-        secrets_info = st.secrets["gcp_service_account"]
-        from google.oauth2.service_account import Credentials
-        scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-        creds = Credentials.from_service_account_info(dict(secrets_info), scopes=scopes)
-        gc = gspread.authorize(creds)
-    except Exception:
-        gc = gspread.service_account(filename=str(CREDENTIALS_FILE))
-    sh = gc.open_by_key(SHEET_ID)
-    worksheet = sh.worksheet("Hoja 1")  # Pestaña específica
-    all_values = worksheet.get_all_values()
-    headers = all_values[0]
-    rows = all_values[1:]
-    df = pd.DataFrame(rows, columns=headers)
-    # Eliminar columnas sin nombre (vacías)
-    df = df.loc[:, df.columns != '']
-    df['fecha_informe'] = df['fecha_informe'].astype(str).str.strip()
-    # Detectar formato: si contiene '/' es DD/MM/YYYY, si contiene '-' es YYYY-MM-DD o DD-MM-YYYY
-    sample = df['fecha_informe'].iloc[0] if len(df) > 0 else ''
-    if '/' in sample:
-        # Formato DD/MM/YYYY
-        df['fecha_informe'] = pd.to_datetime(df['fecha_informe'], format='%d/%m/%Y', errors='coerce')
-    elif '-' in sample and len(sample) >= 10:
-        # Verificar si empieza con año (YYYY-) o día (DD-)
-        first_part = sample.split('-')[0]
-        if len(first_part) == 4:
-            # Formato YYYY-MM-DD (ISO)
-            df['fecha_informe'] = pd.to_datetime(df['fecha_informe'], format='%Y-%m-%d', errors='coerce')
-        else:
-            # Formato DD-MM-YYYY
-            df['fecha_informe'] = pd.to_datetime(df['fecha_informe'], format='%d-%m-%Y', errors='coerce')
-    else:
-        df['fecha_informe'] = pd.to_datetime(df['fecha_informe'], dayfirst=True, errors='coerce')
+        df = _bq_df(sql)
+    except Exception as e:
+        st.error(f"No se pudo leer BigQuery (historico_2026_completo / historico_alertas): {e}")
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    df['fecha_informe'] = pd.to_datetime(df['fecha_informe'].astype(str).str.strip(),
+                                         format='%Y-%m-%d', errors='coerce')
     df = df.dropna(subset=['fecha_informe'])
     df = df[df['fecha_informe'] >= pd.Timestamp('2026-01-01')]  # Solo 2026 en adelante
     df['fecha_informe'] = df['fecha_informe'].dt.date
@@ -374,6 +384,11 @@ def load_historical_data():
     return df
 
 df_hist = load_historical_data()
+if df_hist.empty or 'fecha_informe' not in df_hist.columns:
+    st.error("⚠️ No se pudieron cargar datos desde BigQuery. Verifica que la cuenta de servicio "
+             "**dashboard-alertas@kuepa-alertadashboard.iam.gserviceaccount.com** tenga los roles "
+             "**BigQuery Data Viewer** (dataset `alertas_academicas`) y **BigQuery Job User** (proyecto).")
+    st.stop()
 fechas_disponibles = sorted(df_hist['fecha_informe'].unique(), reverse=True)
 
 # ---- SIDEBAR ----
@@ -441,30 +456,7 @@ if len(df_principal) == 0:
 # ============================================================
 # CARGA DE PESTAÑAS NUEVAS: Asistencia y Notas
 # ============================================================
-def _get_worksheet_df(sheet_name):
-    try:
-        secrets_info = st.secrets["gcp_service_account"]
-        from google.oauth2.service_account import Credentials
-        scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-        creds = Credentials.from_service_account_info(dict(secrets_info), scopes=scopes)
-        gc = gspread.authorize(creds)
-    except Exception:
-        gc = gspread.service_account(filename=str(CREDENTIALS_FILE))
-    sh = gc.open_by_key(SHEET_ID)
-    try:
-        ws = sh.worksheet(sheet_name)
-    except Exception:
-        # Tolerar diferencias de mayúsculas/espacios en el nombre de la pestaña
-        # (p. ej. la pestaña se llama "MATERIAS" y aquí pedimos "Materias").
-        target = sheet_name.strip().lower()
-        ws = next((w for w in sh.worksheets() if w.title.strip().lower() == target), None)
-        if ws is None:
-            return pd.DataFrame()
-    vals = ws.get_all_values()
-    if not vals:
-        return pd.DataFrame()
-    df = pd.DataFrame(vals[1:], columns=vals[0])
-    return df.loc[:, df.columns != '']
+# (La lectura de datos ahora es por BigQuery vía _bq_df; ver la sección de config arriba.)
 
 def _parse_fecha_series(s):
     s = s.astype(str).str.strip()
@@ -479,8 +471,18 @@ def _parse_fecha_series(s):
 
 @st.cache_data(ttl=300)
 def load_asistencia():
+    sql = f"""
+        SELECT CAST(user_incremental AS STRING) AS user_incremental,
+               NOMBRE_ESTUDIANTE, ESTADO_ACADEMICO, PROGRAMA, NIVEL, GRUPO, ASIGNATURA,
+               CAST(START_DATE AS STRING) AS START_DATE, CAST(END_DATE AS STRING) AS END_DATE,
+               TOTAL_SESIONES_PROGRAMADAS, TOTAL_SESIONES_REGISTRADAS, SESIONES_SIN_REGISTRAR,
+               SESIONES_ASISTIO, SESIONES_NO_ASISTIO, SESIONES_TARDE, SESIONES_PENDIENTE,
+               PORCENTAJE_ASISTENCIA, NIVEL_ALERTA, ESTADO_REGISTRO_PROFESORES,
+               CAST(FECHA_REPORTE AS STRING) AS FECHA_REPORTE, clave_registro
+        FROM `{BQ_DATASET}.historico_asistencia`
+    """
     try:
-        df = _get_worksheet_df("Asistencia")
+        df = _bq_df(sql)
     except Exception:
         return pd.DataFrame()
     if df.empty or 'FECHA_REPORTE' not in df.columns:
@@ -496,8 +498,23 @@ def load_asistencia():
 
 @st.cache_data(ttl=300)
 def load_notas():
+    # historico_notas viene POR MATERIA (area, nota, es_aprobado). El dashboard espera un
+    # RESUMEN por estudiante, así que se agrega aquí con los mismos nombres que traía el Sheet.
+    sql = f"""
+        SELECT CAST(user_incremental AS STRING) AS user_incremental,
+               ANY_VALUE(user_full_name) AS user_full_name,
+               ANY_VALUE(modalidad) AS modalidad,
+               ANY_VALUE(program_name) AS program_name,
+               COUNT(*) AS modulos_cursados,
+               SUM(CASE WHEN es_aprobado = 1 THEN 1 ELSE 0 END) AS modulos_aprobados,
+               COUNT(*) - SUM(CASE WHEN es_aprobado = 1 THEN 1 ELSE 0 END) AS modulos_reprobados,
+               ROUND(AVG(nota), 2) AS nota_promedio,
+               CAST(fecha_informe AS STRING) AS fecha_informe
+        FROM `{BQ_DATASET}.historico_notas`
+        GROUP BY user_incremental, fecha_informe
+    """
     try:
-        df = _get_worksheet_df("Notas")
+        df = _bq_df(sql)
     except Exception:
         return pd.DataFrame()
     if df.empty or 'fecha_informe' not in df.columns:
@@ -515,32 +532,21 @@ def load_notas():
 
 @st.cache_data(ttl=300)
 def load_materias():
-    """Ranking de materias más reprobadas (1 fila por programa × materia)."""
-    try:
-        df = _get_worksheet_df("Materias")
-    except Exception:
-        return pd.DataFrame()
-    if df.empty or 'fecha_informe' not in df.columns:
-        return pd.DataFrame()
-    for c in ['estudiantes_cursaron', 'estudiantes_reprobaron', 'pct_reprobacion', 'nota_promedio']:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.', regex=False), errors='coerce')
-    df['fecha_informe'] = _parse_fecha_series(df['fecha_informe'])
-    df = df.dropna(subset=['fecha_informe'])
-    # Defensa: el ranking suma estudiantes_reprobaron por programa. Si el nodo n8n
-    # appendeó la misma corrida más de una vez, habría filas duplicadas por
-    # (programa, materia, fecha) que inflarían la suma (síntoma: el ranking marca
-    # más reprobados que el drill-down de NotasDetalle). Dedup por la llave única.
-    dedup = [c for c in ['program_name', 'materia', 'fecha_informe'] if c in df.columns]
-    if dedup:
-        df = df.drop_duplicates(subset=dedup)
-    return df
+    """Sin tabla de Materias en BigQuery: el ranking de materias se deriva de NotasDetalle.
+    Se devuelve vacío a propósito (el dashboard oculta el % de dificultad y usa NotasDetalle)."""
+    return pd.DataFrame()
 
 @st.cache_data(ttl=300)
 def load_notas_detalle():
     """Detalle estudiante × materia reprobada (para el drill-down de materias)."""
+    sql = f"""
+        SELECT CAST(user_incremental AS STRING) AS user_incremental,
+               user_full_name, modalidad, program_name, materia, nota_materia,
+               CAST(fecha_informe AS STRING) AS fecha_informe
+        FROM `{BQ_DATASET}.historico_notas_detalle`
+    """
     try:
-        df = _get_worksheet_df("NotasDetalle")
+        df = _bq_df(sql)
     except Exception:
         return pd.DataFrame()
     if df.empty or 'fecha_informe' not in df.columns:

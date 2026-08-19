@@ -5,7 +5,7 @@
 > **Manténlo actualizado**: cada vez que se complete un paso, marca el checklist y
 > anota decisiones nuevas en la sección correspondiente.
 
-Última actualización: 2026-06-12
+Última actualización: 2026-08-19
 
 ---
 
@@ -18,7 +18,8 @@ académica). Principios:
 - **Snapshot histórico, no foto en vivo.** Cada corrida semanal congela el estado de
   cada estudiante con una `fecha_informe`. El valor no está solo en "quién está en
   riesgo hoy", sino en **la evolución**: quién mejoró, quién empeoró, qué gestor movió
-  la aguja. Por eso nunca consultamos BigQuery en vivo desde el dashboard.
+  la aguja. El dashboard lee **tablas de snapshots** (historia), nunca las tablas fuente
+  del SIS en vivo — la filosofía se mantiene aunque el almacén haya pasado de Sheet a BQ.
 - **El estudiante es la unidad de gestión.** Las alertas se consolidan a nivel
   estudiante aunque la data fuente sea más granular (por materia, por sesión).
 - **Múltiples señales > una sola.** Un alumno con una alerta es ruido; un alumno con
@@ -35,28 +36,47 @@ académica). Principios:
 
 ## 2. Arquitectura
 
+> **⚠️ CAMBIO DE ARQUITECTURA (2026-08-19): el almacén pasó de Google Sheet a BigQuery.**
+> El Sheet se saturaba (crecía sin límite con los snapshots semanales). Ahora n8n **inserta
+> en BigQuery** y el dashboard **lee de BigQuery**. El Google Sheet quedó **retirado** (los
+> nodos de Sheets se quitaron del workflow). La filosofía de snapshots no cambia.
+
 ```
-BigQuery (potent-poetry-284019)
-        │   queries SQL (una por tipo de alerta)
+BigQuery FUENTE (potent-poetry-284019, tablas del SIS)
+        │   queries SQL (una por tipo de alerta) + code node (clasifica alertas/gestores)
         ▼
-n8n  ── workflow SEMANAL, un nodo de query por alerta ──┐
-        │                                                │ escribe
-        ▼                                                ▼
-Google Sheet (ID 1hPWt0oBdbJTuIEbkFh1G9V1NDXh_ADKUt3OqJPocxaU)
-   ├─ Hoja 1     → alertas de conexión/login + estado financiero   [EN PROD]
-   ├─ Asistencia → ausentismo (por estudiante × materia)           [POR CREAR]
-   └─ Notas      → reprobación (por estudiante × materia)          [POR CREAR]
+n8n  ── workflow SEMANAL (lunes 7am), un nodo de query por alerta ──┐
+        │                                                            │ INSERT
+        ▼                                                            ▼
+BigQuery SNAPSHOTS  (proyecto kuepa-alertadashboard · dataset alertas_academicas)
+   ├─ historico_alertas        → feed nuevo en curso (login/conexión + financiero + gestor)
+   ├─ historico_2026_completo  → historia reconstruida (30 snapshots, 2026-01 → 2026-08-17)
+   ├─ historico_asistencia     → ausentismo (por estudiante × materia)
+   ├─ historico_notas          → reprobación (1 fila por estudiante × MATERIA)
+   └─ historico_notas_detalle  → detalle estudiante × materia reprobada
         │
         ▼
-Streamlit  dashboard_alertas.py  (lee el Sheet con gspread, cache 5 min)
+Streamlit  dashboard_alertas.py  (lee BQ con google-cloud-bigquery, cache 5 min)
 ```
 
-- **Pipeline:** un workflow **semanal de n8n** corre las queries y escribe cada
-  resultado a una pestaña del Sheet. Para alertas nuevas → nodo de query nuevo + pestaña
-  nueva. Los tres nodos deben correr en la **misma ejecución** para que las
-  `fecha_informe` coincidan (es la llave del cruce 360).
-- **Dashboard:** `dashboard_alertas.py` (Streamlit). Lee el Sheet, no BigQuery. Auth vía
-  `st.secrets["gcp_service_account"]` en cloud o `credentials.json` local.
+- **Pipeline:** workflow **semanal de n8n** (lunes 7am). Cada rama corre su query y **hace
+  INSERT en su tabla BQ**. La llave anti-duplicados es `clave_registro`
+  (`user_incremental|fecha_informe` en alertas; `...|materia|fecha` en notas/asistencia).
+- **Dashboard:** `dashboard_alertas.py` (Streamlit). Lee las 5 tablas BQ vía
+  `google-cloud-bigquery`. Auth con la cuenta de servicio
+  **`dashboard-alertas@kuepa-alertadashboard.iam.gserviceaccount.com`**
+  (`st.secrets["gcp_service_account"]` en cloud / `credentials.json` local), que necesita
+  **BigQuery Data Viewer** + **BigQuery Job User** sobre `kuepa-alertadashboard`.
+- **Mapeo loaders → tablas** (en `dashboard_alertas.py`):
+  - `load_historical_data` = **UNION** de `historico_2026_completo` (pasado) + `historico_alertas`
+    (nuevo); `snapshot`/`fecha_informe` → `fecha_informe`.
+  - `load_notas` = `historico_notas` **agregada** con GROUP BY a resumen por estudiante
+    (`modulos_cursados/aprobados/reprobados`, `nota_promedio`) — la tabla viene POR MATERIA.
+  - `load_notas_detalle` = `historico_notas_detalle` · `load_asistencia` = `historico_asistencia`
+    (lectura directa) · `load_materias` = **vacío** (el ranking se deriva de NotasDetalle).
+- **Ojo:** no existe tabla `Materias` (ni hace falta). El feed viejo por Sheet
+  (`SHEET_ID 1hPWt0oB…`, pestañas Hoja 1/Notas/Materias/NotasDetalle/Asistencia) quedó
+  **obsoleto**; se conserva solo como respaldo histórico manual.
 
 ### Llave de cruce
 `user_incremental` + `fecha_informe`. Es el único campo común a las tres fuentes.

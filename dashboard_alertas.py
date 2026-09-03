@@ -1720,13 +1720,15 @@ with tab_conexion:
     doble_df = df_principal[
         (df_principal['gravedad'] >= 3) &
         (df_principal['financial_status_name'].isin(['Mora avanzada', 'Baja por mora']))
-    ][['user_incremental', 'user_full_name', 'gestor_asignado', 'alert_type', 'financial_status_name', 'gravedad', 'fin_rank']].copy()
-    
+    ][['user_incremental', 'user_full_name', 'gestor_asignado', 'alert_type', 'financial_status_name', 'gravedad', 'fin_rank', 'patrocinado']].copy()
+
     if len(doble_df) > 0:
         doble_df['riesgo_total'] = doble_df['gravedad'] + doble_df['fin_rank']
+        # Patrocinado (solo técnicos): 🔴 No = mayor riesgo; 🟢 Sí; — = no aplica (bachillerato).
+        doble_df['Patrocinado'] = doble_df['patrocinado'].map({'Sí': '🟢 Sí', 'No': '🔴 No'}).fillna('—')
         st.dataframe(
             doble_df.sort_values('riesgo_total', ascending=False)
-            .drop(columns=['gravedad', 'fin_rank', 'riesgo_total'])
+            .drop(columns=['gravedad', 'fin_rank', 'riesgo_total', 'patrocinado'])
             .reset_index(drop=True)
             .rename(columns={
                 'user_incremental':       'ID',

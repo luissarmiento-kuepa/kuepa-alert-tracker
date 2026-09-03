@@ -398,9 +398,9 @@ def load_historical_data():
 PATROCINIO_SHEET_ID = "1ts6LHaUWCIm4bbEceH0yOE-MyopRWlAN9ojZ9lvI0KY"
 
 @st.cache_data(ttl=300)
-def load_patrocinio():
-    """{user_incremental(str) -> 'Sí'/'No'} según contrato de aprendizaje vigente (Sheet de prácticas).
-    Patrocinado = 'Estado Caprendizaje Final' == 'VIGENTE'. Cruce por 'ID SIS' = user_incremental."""
+def _load_patrocinio_raw():
+    """Devuelve (mapa, error). error='' si OK. mapa: {user_incremental -> 'Sí'/'No'}.
+    Patrocinado = 'Estado Caprendizaje Final' == 'VIGENTE'. Cruce 'ID SIS' = user_incremental."""
     try:
         from google.oauth2.service_account import Credentials
         scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
@@ -409,15 +409,15 @@ def load_patrocinio():
         except Exception:
             creds = Credentials.from_service_account_file(str(CREDENTIALS_FILE), scopes=scopes)
         vals = gspread.authorize(creds).open_by_key(PATROCINIO_SHEET_ID).sheet1.get_all_values()
-    except Exception:
-        return {}
+    except Exception as e:
+        return {}, f"{type(e).__name__}: {str(e)[:220]}"
     if not vals or not vals[0]:
-        return {}
+        return {}, "el Sheet vino vacío"
     header = [h.strip() for h in vals[0]]
     try:
         i_id, i_est = header.index('ID SIS'), header.index('Estado Caprendizaje Final')
     except ValueError:
-        return {}
+        return {}, "no están las columnas 'ID SIS' / 'Estado Caprendizaje Final' en la 1a pestaña"
     mapa = {}
     for r in vals[1:]:
         if len(r) <= max(i_id, i_est):
@@ -425,7 +425,10 @@ def load_patrocinio():
         uid = str(r[i_id]).strip()
         if uid and uid != '#REF!':
             mapa[uid] = 'Sí' if str(r[i_est]).strip().upper() == 'VIGENTE' else 'No'
-    return mapa
+    return mapa, ''
+
+def load_patrocinio():
+    return _load_patrocinio_raw()[0]
 
 df_hist = load_historical_data()
 if df_hist.empty or 'fecha_informe' not in df_hist.columns:
@@ -471,12 +474,11 @@ with st.sidebar:
     patrocinio_sel = st.multiselect("", ['Sí', 'No'], default=[], label_visibility="collapsed",
                                     key="patro", placeholder="Todos")
     # Diagnóstico: confirma si el Sheet de patrocinio se pudo leer (evita el "todo en —" silencioso).
-    _pmap = load_patrocinio()
+    _pmap, _perr = _load_patrocinio_raw()
     if _pmap:
         st.caption(f"✓ {sum(1 for v in _pmap.values() if v == 'Sí'):,} patrocinados vigentes cargados")
     else:
-        st.caption("⚠️ No se pudo leer el Sheet de patrocinio (comparte con la cuenta de servicio "
-                   "o haz Clear cache).")
+        st.caption(f"⚠️ No se pudo leer el Sheet de patrocinio — {_perr}")
 
     st.markdown("---")
     st.markdown(f"<p style='color:#656A71; font-size:0.78rem; text-align:center'>{len(df_hist):,} registros totales</p>", unsafe_allow_html=True)

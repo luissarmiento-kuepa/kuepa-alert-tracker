@@ -470,6 +470,13 @@ with st.sidebar:
     st.markdown("<p style='color:#656A71; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.1em; font-weight:700; margin: 12px 0 4px 0'>🤝 Patrocinio (técnicos)</p>", unsafe_allow_html=True)
     patrocinio_sel = st.multiselect("", ['Sí', 'No'], default=[], label_visibility="collapsed",
                                     key="patro", placeholder="Todos")
+    # Diagnóstico: confirma si el Sheet de patrocinio se pudo leer (evita el "todo en —" silencioso).
+    _pmap = load_patrocinio()
+    if _pmap:
+        st.caption(f"✓ {sum(1 for v in _pmap.values() if v == 'Sí'):,} patrocinados vigentes cargados")
+    else:
+        st.caption("⚠️ No se pudo leer el Sheet de patrocinio (comparte con la cuenta de servicio "
+                   "o haz Clear cache).")
 
     st.markdown("---")
     st.markdown(f"<p style='color:#656A71; font-size:0.78rem; text-align:center'>{len(df_hist):,} registros totales</p>", unsafe_allow_html=True)

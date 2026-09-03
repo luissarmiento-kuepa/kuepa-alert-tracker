@@ -408,16 +408,35 @@ def _load_patrocinio_raw():
             creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
         except Exception:
             creds = Credentials.from_service_account_file(str(CREDENTIALS_FILE), scopes=scopes)
-        vals = gspread.authorize(creds).open_by_key(PATROCINIO_SHEET_ID).sheet1.get_all_values()
+        sh = gspread.authorize(creds).open_by_key(PATROCINIO_SHEET_ID)
+        def _has_cols(v):
+            if not v:
+                return False
+            hh = [h.strip() for h in v[0]]
+            return 'ID SIS' in hh and 'Estado Caprendizaje Final' in hh
+        vals = None
+        # Busca la pestaña que tenga las columnas (no asume que es la primera).
+        try:
+            v0 = sh.get_worksheet_by_id(0).get_all_values()
+            if _has_cols(v0):
+                vals = v0
+        except Exception:
+            pass
+        if vals is None:
+            for ws in sh.worksheets():
+                try:
+                    v = ws.get_all_values()
+                except Exception:
+                    continue
+                if _has_cols(v):
+                    vals = v
+                    break
     except Exception as e:
         return {}, f"{type(e).__name__}: {str(e)[:220]}"
-    if not vals or not vals[0]:
-        return {}, "el Sheet vino vacío"
+    if vals is None:
+        return {}, "ninguna pestaña tiene 'ID SIS' + 'Estado Caprendizaje Final' en la fila 1"
     header = [h.strip() for h in vals[0]]
-    try:
-        i_id, i_est = header.index('ID SIS'), header.index('Estado Caprendizaje Final')
-    except ValueError:
-        return {}, "no están las columnas 'ID SIS' / 'Estado Caprendizaje Final' en la 1a pestaña"
+    i_id, i_est = header.index('ID SIS'), header.index('Estado Caprendizaje Final')
     mapa = {}
     for r in vals[1:]:
         if len(r) <= max(i_id, i_est):

@@ -381,7 +381,51 @@ def load_historical_data():
     if dedup:
         df = df.drop_duplicates(subset=dedup)
 
+    # PATROCINIO (contrato de aprendizaje vigente) — solo aplica a técnicos; bachillerato = '—'.
+    # Atributo ACTUAL (lee el Sheet de prácticas): "quién está patrocinado hoy".
+    _patro = load_patrocinio()
+    if _patro:
+        es_tec = ~df['program_name'].fillna('').str.contains('Bachillerato', case=False)
+        df['patrocinado'] = df['user_incremental'].astype(str).str.strip().map(_patro).fillna('No')
+        df.loc[~es_tec, 'patrocinado'] = '—'
+    else:
+        # No se pudo leer el Sheet (no compartido con la cuenta de servicio) → desconocido
+        # para todos, en vez de marcar falsamente a los técnicos como 'No'.
+        df['patrocinado'] = '—'
+
     return df
+
+PATROCINIO_SHEET_ID = "1ts6LHaUWCIm4bbEceH0yOE-MyopRWlAN9ojZ9lvI0KY"
+
+@st.cache_data(ttl=300)
+def load_patrocinio():
+    """{user_incremental(str) -> 'Sí'/'No'} según contrato de aprendizaje vigente (Sheet de prácticas).
+    Patrocinado = 'Estado Caprendizaje Final' == 'VIGENTE'. Cruce por 'ID SIS' = user_incremental."""
+    try:
+        from google.oauth2.service_account import Credentials
+        scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+        try:
+            creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
+        except Exception:
+            creds = Credentials.from_service_account_file(str(CREDENTIALS_FILE), scopes=scopes)
+        vals = gspread.authorize(creds).open_by_key(PATROCINIO_SHEET_ID).sheet1.get_all_values()
+    except Exception:
+        return {}
+    if not vals or not vals[0]:
+        return {}
+    header = [h.strip() for h in vals[0]]
+    try:
+        i_id, i_est = header.index('ID SIS'), header.index('Estado Caprendizaje Final')
+    except ValueError:
+        return {}
+    mapa = {}
+    for r in vals[1:]:
+        if len(r) <= max(i_id, i_est):
+            continue
+        uid = str(r[i_id]).strip()
+        if uid and uid != '#REF!':
+            mapa[uid] = 'Sí' if str(r[i_est]).strip().upper() == 'VIGENTE' else 'No'
+    return mapa
 
 df_hist = load_historical_data()
 if df_hist.empty or 'fecha_informe' not in df_hist.columns:
@@ -423,6 +467,10 @@ with st.sidebar:
     st.markdown("<p style='color:#656A71; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.1em; font-weight:700; margin: 12px 0 4px 0'>👤 Gestor</p>", unsafe_allow_html=True)
     gestores = st.multiselect("", df_hist['gestor_asignado'].unique(), label_visibility="collapsed", key="gest")
 
+    st.markdown("<p style='color:#656A71; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.1em; font-weight:700; margin: 12px 0 4px 0'>🤝 Patrocinio (técnicos)</p>", unsafe_allow_html=True)
+    patrocinio_sel = st.multiselect("", ['Sí', 'No'], default=[], label_visibility="collapsed",
+                                    key="patro", placeholder="Todos")
+
     st.markdown("---")
     st.markdown(f"<p style='color:#656A71; font-size:0.78rem; text-align:center'>{len(df_hist):,} registros totales</p>", unsafe_allow_html=True)
 
@@ -431,6 +479,7 @@ mask = df_hist['fecha_informe'] == fecha_principal
 if etapas_sel: mask &= df_hist['etapa'].isin(etapas_sel)
 if programas: mask &= df_hist['program_name'].isin(programas)
 if gestores: mask &= df_hist['gestor_asignado'].isin(gestores)
+if patrocinio_sel: mask &= df_hist['patrocinado'].isin(patrocinio_sel)
 df_principal = df_hist[mask]
 
 # ---- HEADER ----
@@ -1100,7 +1149,7 @@ def render_reprobacion():
 # ============================================================
 def render_riesgo360():
     base = df_principal.drop_duplicates('user_incremental')[
-        ['user_incremental', 'user_full_name', 'gestor_asignado', 'gravedad', 'financial_status_name']
+        ['user_incremental', 'user_full_name', 'gestor_asignado', 'gravedad', 'financial_status_name', 'patrocinado']
     ].copy()
     base['user_incremental'] = base['user_incremental'].astype(str)
     base['sig_login'] = base['gravedad'] >= 3
@@ -1165,8 +1214,10 @@ def render_riesgo360():
     st.divider()
 
     st.markdown("<div class='section-title' style='border-color:#C0392B'>🚨 Estudiantes en Riesgo Múltiple — 2+ señales simultáneas</div>", unsafe_allow_html=True)
-    show = (multi.sort_values('num_senales', ascending=False)
-            [['user_incremental', 'user_full_name', 'gestor_asignado', 'Señales', 'num_senales']]
+    show = multi.sort_values('num_senales', ascending=False).copy()
+    # Patrocinado (solo técnicos): 🔴 No = mayor riesgo de deserción; 🟢 Sí; — = no aplica (bachillerato).
+    show['Patrocinado'] = show['patrocinado'].map({'Sí': '🟢 Sí', 'No': '🔴 No'}).fillna('—')
+    show = (show[['user_incremental', 'user_full_name', 'gestor_asignado', 'Patrocinado', 'Señales', 'num_senales']]
             .reset_index(drop=True).rename(columns={
                 'user_incremental': 'ID', 'user_full_name': 'Estudiante',
                 'gestor_asignado': 'Gestor', 'num_senales': '# Señales',
@@ -1203,6 +1254,14 @@ def _panel_conexion(est):
     c2.metric("💳 Estado financiero", str(est.get('financial_status_name') or '—'))
     c3.metric("👤 Gestor", str(est.get('gestor_asignado') or '—'))
     st.caption(f"🎓 {est.get('program_name', '—')}  ·  Etapa: {est.get('etapa', '—')}")
+    _patro = str(est.get('patrocinado') or '—')
+    if _patro == 'No':
+        st.markdown("<p style='color:#C0392B;font-weight:700;margin:.2rem 0'>🔴 Sin patrocinio — "
+                    "no tiene contrato de aprendizaje vigente (mayor riesgo de deserción).</p>",
+                    unsafe_allow_html=True)
+    elif _patro == 'Sí':
+        st.markdown("<p style='color:#149852;font-weight:700;margin:.2rem 0'>🟢 Patrocinado — "
+                    "contrato de aprendizaje vigente.</p>", unsafe_allow_html=True)
     st.divider()
 
 def _panel_reprobacion(est):

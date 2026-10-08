@@ -239,6 +239,9 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
   `clasifica categoría` del workflow n8n `ALERTAS_HST_V4.0`, y **solo a quien tiene alerta de
   conexión** (mora/reprobación/ausentismo sin alerta de login quedan sin gestor — decisión vigente).
   Snapshots anteriores no se reescriben (conservan quién gestionó en su momento).
+- **Gestores Técnicos (desde corrida 2026-10-12):** el **módulo alpha** = nivel `Introducción`
+  → **ENYERIS PALOMINO** (todo, fuera del balanceo). El resto de la etapa lectiva sigue en
+  round-robin entre CRISTIAN PALACIOS / KINNBERLY PINEDA / MAURICIO DUQUE. Productiva: sin gestor.
 
 ---
 

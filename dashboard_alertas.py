@@ -330,7 +330,7 @@ def load_historical_data():
     _cols = ["user_id", "user_incremental", "user_full_name", "contact_incremental",
              "program_id", "program_name", "level_id", "level_name", "academic_status_id",
              "academic_status_name", "financial_status_id", "financial_status_name",
-             "dias_desconexion", "alert_type", "selection_flag", "gestor_asignado"]
+             "dias_desconexion", "alert_type", "selection_flag", "gestor_asignado", "user_last_login"]
     _sel = ", ".join(f"CAST({c} AS STRING) AS {c}" for c in _cols)
     sql = f"""
         SELECT {_sel}, CAST(snapshot AS STRING) AS fecha_informe
@@ -1373,6 +1373,58 @@ if _q and str(_q).strip():
 # ============================================================
 # 📉 Ausentismo: temporalmente FUERA DEL AIRE (feed v2 en revisión, evita confusión).
 # La función render_ausentismo() y su loader quedan en el código para reactivarla luego.
+# ============================================================
+# DESCARGA SEMANAL POR GESTOR (alertas de conexión / login)
+# ============================================================
+# Cada gestor baja su lista de la semana para trabajarla. Respeta los filtros del sidebar
+# (fecha, etapa, programa, patrocinio) y agrega la alerta de la semana anterior para que
+# vea a simple vista quién empeoró o es nuevo en su lista.
+def render_descarga_conexion():
+    st.markdown("<div class='section-title' style='border-color:#FD531E'>📥 Descarga semanal por gestor — alertas de conexión</div>", unsafe_allow_html=True)
+    d = df_principal[df_principal['gravedad'] > 0]
+    gest_disp = sorted(g for g in d['gestor_asignado'].dropna().unique() if str(g).strip())
+    if not gest_disp:
+        st.info("No hay alertas de conexión con gestor asignado para esta fecha.")
+        return
+    opciones = ['Todos los gestores'] + gest_disp
+    idx = opciones.index(gestores[0]) if len(gestores) == 1 and gestores[0] in opciones else 0
+    gest = st.selectbox("Gestor", opciones, index=idx, key="dl_gestor")
+    if gest != 'Todos los gestores':
+        d = d[d['gestor_asignado'] == gest]
+
+    # Alerta de la semana anterior (snapshot previo más reciente)
+    previas = [f for f in fechas_disponibles if f < fecha_principal]
+    d = d.copy()
+    if previas:
+        ant = df_hist[df_hist['fecha_informe'] == previas[0]][['user_incremental', 'alert_type']]
+        d = d.merge(ant.rename(columns={'alert_type': 'alerta_ant'}), on='user_incremental', how='left')
+        d['alerta_ant'] = d['alerta_ant'].fillna('—')
+    else:
+        d['alerta_ant'] = '—'
+    d['ultimo_login'] = d['user_last_login'].fillna('').astype(str).str[:10]
+
+    cols = ['user_incremental', 'user_full_name', 'program_name', 'level_name', 'academic_status_name',
+            'gestor_asignado', 'alert_type', 'dias_desconexion', 'ultimo_login', 'alerta_ant',
+            'financial_status_name', 'patrocinado']
+    tabla = (d.sort_values(['gravedad', 'fin_rank'], ascending=False)[cols].reset_index(drop=True)
+             .rename(columns={
+                 'user_incremental': 'ID', 'user_full_name': 'Estudiante', 'program_name': 'Programa',
+                 'level_name': 'Nivel', 'academic_status_name': 'Estado Académico',
+                 'gestor_asignado': 'Gestor', 'alert_type': 'Alerta Login',
+                 'dias_desconexion': 'Días Desconexión', 'ultimo_login': 'Último Login',
+                 'alerta_ant': 'Alerta Semana Anterior', 'financial_status_name': 'Estado Financiero',
+                 'patrocinado': 'Patrocinado',
+             }))
+    st.dataframe(tabla, use_container_width=True, height=320)
+    slug = 'todos' if gest == 'Todos los gestores' else gest.lower().replace(' ', '_')
+    st.download_button(
+        f"⬇️ Descargar {len(tabla):,} alertas (CSV)", tabla.to_csv(index=False).encode('utf-8-sig'),
+        file_name=f"alertas_conexion_{slug}_{fecha_principal}.csv", mime="text/csv", key="dl_conexion")
+    _chart_help("Lista de trabajo del gestor: estudiantes con alerta de login en la fecha principal, "
+                "de la más grave a la menos grave. <b>Alerta Semana Anterior</b> = su alerta en el "
+                "snapshot previo (— si no estaba). Respeta los filtros de etapa, programa y patrocinio.")
+    st.divider()
+
 tab_360, tab_conexion, tab_reprob = st.tabs(
     ["🎯 Riesgo 360", "🔌 Conexión", "📕 Reprobación"]
 )
@@ -1385,6 +1437,7 @@ with tab_360:
 with tab_conexion:
     if est_sel is not None:
         _panel_conexion(est_sel)
+    render_descarga_conexion()
     # ============================================================
     # MÉTRICAS
     # ============================================================

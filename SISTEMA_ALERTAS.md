@@ -234,6 +234,11 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
 - Pipeline: **n8n semanal**, un nodo de query + pestaña nueva por alerta (no consultar BQ en vivo).
 - Sesiones sin registrar (docentes): **panel operativo separado**, no se mezcla con el riesgo del estudiante.
 - Navegación: **pestañas superiores**, preservando la vista actual intacta.
+- **Gestores Bachillerato (desde corrida 2026-10-12):** Plus Online → LUIS MARTÍNEZ · Flex →
+  PAULA QUEVEDO · Plus Onsite → **ANDREA MENDOZA** (antes Luis). Se asigna en el code node
+  `clasifica categoría` del workflow n8n `ALERTAS_HST_V4.0`, y **solo a quien tiene alerta de
+  conexión** (mora/reprobación/ausentismo sin alerta de login quedan sin gestor — decisión vigente).
+  Snapshots anteriores no se reescriben (conservan quién gestionó en su momento).
 
 ---
 
@@ -258,6 +263,9 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
   (3) tabla accionable por estudiante.
 - [x] **Ausentismo retirado del aire (2026-06-12):** pestaña fuera de `st.tabs`, señal `sig_asis`
   de 360 en pausa. `render_ausentismo()` / `load_asistencia()` quedan en el código sin cablear.
+- [x] **Descarga semanal por gestor (2026-10-08):** `render_descarga_conexion()` arriba de la
+  pestaña 🔌 Conexión — selector de gestor + CSV con las alertas de login de la fecha principal
+  (incluye último login y alerta de la semana anterior). Respeta filtros del sidebar.
 - [ ] Reescribir `render_ausentismo()` al esquema v2 (días de falta) y reactivar pestaña + señal 360.
 - [ ] Comparativos/eficacia week-over-week en las pestañas nuevas (v1 muestra fecha actual).
 

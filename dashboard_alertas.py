@@ -1425,8 +1425,8 @@ def render_descarga_conexion():
                 "snapshot previo (— si no estaba). Respeta los filtros de etapa, programa y patrocinio.")
     st.divider()
 
-tab_360, tab_conexion, tab_reprob = st.tabs(
-    ["🎯 Riesgo 360", "🔌 Conexión", "📕 Reprobación"]
+tab_360, tab_conexion, tab_reprob, tab_gestores = st.tabs(
+    ["🎯 Riesgo 360", "🔌 Conexión", "📕 Reprobación", "👥 Gestores"]
 )
 
 with tab_360:
@@ -2039,3 +2039,8 @@ with tab_reprob:
     if est_sel is not None:
         _panel_reprobacion(est_sel)
     render_reprobacion()
+
+with tab_gestores:
+    # Desempeño diario de gestores (cola de gestión). Módulo aparte: panel_gestores.py
+    from panel_gestores import render_gestores
+    render_gestores(_bq_df, _chart_help)

@@ -53,7 +53,10 @@ BigQuery SNAPSHOTS  (proyecto kuepa-alertadashboard · dataset alertas_academica
    ├─ historico_2026_completo  → historia reconstruida (30 snapshots, 2026-01 → 2026-08-17)
    ├─ historico_asistencia     → ausentismo (por estudiante × materia)
    ├─ historico_notas          → reprobación (1 fila por estudiante × MATERIA)
-   └─ historico_notas_detalle  → detalle estudiante × materia reprobada
+   ├─ historico_notas_detalle  → detalle estudiante × materia reprobada
+   └─ cola_gestores            → cola de gestión académica (Bach + Técnicos), DIARIA 6:30, flujo n8n
+                                 «cola_gestores_diaria» (UJRlZgOU13JFMfuZ) desde DSKU_SIS.EKU101042_management_queue
+                                 (us-east1). La lee la pestaña 👥 Gestores (panel_gestores.py). Sin celulares.
         │
         ▼
 Streamlit  dashboard_alertas.py  (lee BQ con google-cloud-bigquery, cache 5 min)

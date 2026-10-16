@@ -339,3 +339,10 @@ Completado. El workflow ejecuta semanalmente y popula 3370 filas cada ejecución
   gestor en ~98 %), pero **dejó de replicarse el 2026-10-05**. Si el equipo de datos la reactiva, se puede
   medir cada respuesta (inbound → siguiente outbound al mismo estudiante).
 - Gráfica de evolución: una línea por gestor (top 8 por pendientes hoy), etiquetas en cada punto, eje por día.
+- **Calidad del cierre (2026-10-16):** columnas por gestor *Cerrados sin responder (%)* y *Volvió a escribir
+  7 días (%)* sobre los casos cerrados hace 7–28 días, + lista descargable **"Cierres para revisar"**.
+  Sin responder = cerrado con último mensaje del estudiante que no es cortesía; volvió = el estudiante abrió
+  otro caso de chat ≤7 días después del cierre. Para la cortesía se agregaron a `cola_gestores` las
+  columnas `origen` y `cierre_cortesia` (booleano calculado en n8n desde `LAST_INTERACTION_PREVIEW`; el texto
+  NO se guarda). Pobladas desde la carga del 2026-10-17; antes salen vacías (se cuentan como sin responder).
+  Limitación: lo resuelto por llamada se ve como "sin responder".

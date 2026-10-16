@@ -59,6 +59,25 @@ def _preparar(c):
     hace7 = ahora - pd.Timedelta(days=7)
     trabajan = set(c.loc[(c["actualizado"] >= hace7) & ~c["cola"], "gestor"])
     c["trabaja"] = c["gestor"].isin(trabajan) & (c["gestor"] != SIN)
+
+    # CALIDAD DEL CIERRE: señales de que un caso se cerró sin resolverse. Se evalúan los cerrados entre hace
+    # 28 y hace 7 días (a los de la última semana aún no les da tiempo de "volver").
+    #  · sin responder: se cerró con el último mensaje del estudiante y no era cortesía ("gracias", "ok"…);
+    #  · volvió a escribir: el mismo estudiante abrió otro caso (de chat) en los 7 días siguientes al cierre.
+    # cierre_cortesia / origen existen desde la carga del 2026-10-17; en fotos anteriores vienen vacías.
+    c["cierre_cortesia"] = c.get("cierre_cortesia", pd.Series(index=c.index, dtype=object))
+    c["origen"] = c.get("origen", pd.Series(index=c.index, dtype=object))
+    c["cerr_eval"] = ((c["estado_caso"] == "finished") & (c["actualizado"] >= ahora - pd.Timedelta(days=28))
+                      & (c["actualizado"] <= hace7))
+    cort = c["cierre_cortesia"].fillna(False).astype(bool)
+    c["sin_resp"] = c["cerr_eval"] & (c["ult_tipo"] == "message_inbound") & ~cort
+    nuevos = c[c["origen"].isna() | (c["origen"] == "inbound_chat")][["id", "caso", "creado"]]
+    par = c.loc[c["cerr_eval"], ["id", "caso", "actualizado"]].merge(nuevos, on="id", suffixes=("", "_n"))
+    par = par[(par["caso_n"] != par["caso"]) & (par["creado"] > par["actualizado"])
+              & (par["creado"] <= par["actualizado"] + pd.Timedelta(days=7))]
+    vuelta = par.groupby("caso")["creado"].min()
+    c["volvio_en"] = c["caso"].map(vuelta)
+    c["volvio"] = c["volvio_en"].notna()
     return c, ahora
 
 
@@ -82,6 +101,9 @@ def _metricas(cs, ahora):
         "Transferidos 7 días": int(((cs["estado_caso"] == "transferred") & (cs["actualizado"] >= hace7)).sum()),
         "Horas para cerrar (mediana, 28 días)": cerr28["h_cierre"].median(),
         "Siguen activos (%)": (est["estado_hoy"].notna().mean() * 100) if len(est) else None,
+        "Cierres evaluados": int(cs["cerr_eval"].sum()),
+        "Cerrados sin responder (%)": cs.loc[cs["cerr_eval"], "sin_resp"].mean() * 100 if cs["cerr_eval"].any() else None,
+        "Volvió a escribir 7 días (%)": cs.loc[cs["cerr_eval"], "volvio"].mean() * 100 if cs["cerr_eval"].any() else None,
     }
 
 
@@ -115,10 +137,12 @@ def _rojo(col, umbral):
 def _mostrar(t):
     fmt = {k: "{:.1f}" for k in ["Días en cola (mediana)", "Días esperando (mediana)"]}
     fmt.update({"Horas para cerrar (mediana, 28 días)": "{:.0f}", "Siguen activos (%)": "{:.0f} %",
-                "Respuesta (h, mediana)": "{:.1f}", "Respuesta (h, promedio)": "{:.1f}"})
+                "Respuesta (h, mediana)": "{:.1f}", "Respuesta (h, promedio)": "{:.1f}",
+                "Cerrados sin responder (%)": "{:.0f} %", "Volvió a escribir 7 días (%)": "{:.0f} %"})
     sty = t.style.format(fmt, na_rep="—")
     for col, u in [("Esperando respuesta", 10), ("Críticos en cola", 5), ("En cola +7 días", 10),
-                   ("Respuesta (h, mediana)", 24)]:
+                   ("Respuesta (h, mediana)", 24), ("Cerrados sin responder (%)", 25),
+                   ("Volvió a escribir 7 días (%)", 30)]:
         sty = sty.apply(_rojo(col, u), axis=0)
     st.dataframe(sty, hide_index=True, use_container_width=True)
 
@@ -183,7 +207,10 @@ def render_gestores(_bq_df, chart_help):
                "tiene hoy estado académico activo. <b>Respuesta (h)</b>: horas entre el último mensaje del "
                "estudiante y la respuesta del gestor, medido entre dos fotos diarias seguidas (aproximado, en rojo "
                "si la mediana pasa de 24 h). Con pocas <i>respuestas medidas</i> la cifra aún no es confiable: "
-               "gana precisión con cada foto diaria.")
+               "gana precisión con cada foto diaria. <b>Calidad del cierre</b> (casos cerrados hace 7 a 28 días): "
+               "<b>sin responder</b> = se cerró con el último mensaje del estudiante y no era un «gracias/ok» "
+               "(rojo desde 25 %); <b>volvió a escribir</b> = el estudiante abrió otro caso en los 7 días "
+               "siguientes (rojo desde 30 %). Ojo: si se resolvió por llamada, el chat se ve sin responder.")
 
     # ---- evolución
     # Una línea por gestor (o, viendo a uno solo, sus dos curvas), con el número en cada punto y el eje
@@ -231,6 +258,33 @@ def render_gestores(_bq_df, chart_help):
                    + (" La punteada es todo lo que tiene en cola." if uno else
                       (f" Se muestran los 8 con más pendientes hoy; los otros {resto} se ven eligiéndolos en "
                        "<i>Ver</i>." if resto > 0 else "")))
+
+    # ---- cierres para revisar (calidad del cierre)
+    rev = cs[cs["sin_resp"] | cs["volvio"]].sort_values("actualizado", ascending=False)
+    st.markdown(f"<div class='section-title' style='border-color:#9725B9'>🔍 {len(rev)} cierres para revisar "
+                "— ¿se solucionó de verdad?</div>", unsafe_allow_html=True)
+    if c["cierre_cortesia"].isna().all():
+        st.caption("⚠️ La foto de hoy aún no distingue los cierres de cortesía («gracias», «ok»): se cuentan "
+                   "como sin responder. Desde la carga de mañana a las 6:30 ya se descuentan.")
+    if len(rev):
+        señal = (rev["sin_resp"].map({True: "Cerrado sin responder", False: ""}) + " · "
+                 + rev["volvio"].map({True: "Volvió a escribir", False: ""})).str.strip(" ·")
+        tabla_rev = pd.DataFrame({
+            "ID": rev["id"], "Estudiante": rev["estudiante"], "Programa": rev["prog"], "Gestor": rev["gestor"],
+            "Cerrado": rev["actualizado"].dt.tz_convert("America/Bogota").dt.strftime("%Y-%m-%d"),
+            "Señal": señal,
+            "Volvió a los (días)": ((rev["volvio_en"] - rev["actualizado"]).dt.total_seconds() / 86400).round(1),
+            "Motivo (resumen automático)": rev["motivo"].fillna(""),
+        })
+        st.dataframe(tabla_rev, hide_index=True, use_container_width=True, height=360)
+        st.download_button(f"⬇️ Descargar {len(tabla_rev):,} cierres para revisar (CSV)",
+                           tabla_rev.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"cierres_revisar_{ver.lower().replace(' ', '_') if uno else 'todos'}"
+                                     f"_{ahora:%Y-%m-%d}.csv",
+                           mime="text/csv", key="dl_cierres")
+    chart_help("Casos cerrados hace 7 a 28 días con alguna señal de que no quedaron resueltos. Revisar unos "
+               "cuantos por semana en la plataforma (y que el equipo lo sepa) es lo que más previene los cierres "
+               "por cumplir. Si se resolvió por llamada, es normal que salga como «sin responder».")
 
     # ---- lista de pendientes
     pend = cs[cs["esperando"]].sort_values("dias_espera", ascending=False)

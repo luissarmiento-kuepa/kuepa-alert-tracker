@@ -245,6 +245,16 @@ Pestañas superiores (`st.tabs`), sin romper lo existente:
 - **Gestores Técnicos (desde corrida 2026-10-12):** nivel `Introducción` o `Módulo Alpha`/`Alfa`
   → **ENYERIS PALOMINO** (todo, fuera del balanceo). El resto de la etapa lectiva sigue en
   round-robin entre CRISTIAN PALACIOS / KINNBERLY PINEDA / MAURICIO DUQUE. Productiva: sin gestor.
+- **Aliado EFE vs HST (2026-10-15):** se agregaron los 7 programas técnicos EFE (`program_id`
+  689a3c4d…, 6ab45fee…, 6340383b…, 66bf59c6…, 63405ef2…, 668d32f2…, 6494c845…) a las queries
+  LOGIN Y CARTERA, AUSENTISMO y NotasDetalle (REPROBACIÓN no: su feed está parado desde 08-31).
+  **Alcance = solo técnicos y bachillerato:** fuera el `Curso Intensivo de Ingles_EFE` (6a0f4eca…)
+  y todo estudiante en nivel `A1 Ingles_EFE` (en cualquier programa) — filtro en las 3 queries y
+  en `load_historical_data` (limpia snapshots viejos).
+  Es EFE quien tenga la palabra "EFE" en el **programa o en el nivel**. El resto de técnicos = HST. **EFE va sin
+  gestor** por ahora (la regla EFE va antes de la de Introducción en `clasifica categoría`).
+  En el dashboard la columna `aliado` se **deriva** de programa+nivel (no está en BQ) → filtro
+  "🏫 Aliado (técnicos)" en el sidebar; funciona también sobre snapshots viejos.
 
 ---
 
@@ -314,3 +324,18 @@ Completado. El workflow ejecuta semanalmente y popula 3370 filas cada ejecución
 - Tabla "Doble Riesgo" (a evolucionar → Riesgo Múltiple): ~L744.
 - CSS / identidad visual: ~L16–225.
 - Queries fuente de los nodos n8n: carpeta `queries/` (ver su `README.md`).
+
+---
+
+## 8. Pestaña Gestores — tiempo de respuesta (2026-10-16)
+
+- Fuente: `alertas_academicas.cola_gestores` (foto diaria 6:30 de `EKU101042_management_queue`, flujo n8n
+  `cola_gestores_diaria`). La cola guarda **solo el último mensaje** de cada caso.
+- **Tiempo de respuesta = aproximado:** casos que en la foto del día D esperaban respuesta (último mensaje
+  del estudiante, `t_in`) y en la foto D+1 tienen último mensaje del gestor (`t_out`) → `t_out - t_in`.
+  Sobrestima si el gestor escribió varias veces entre fotos; no ve lo que se abre y responde entre dos fotos.
+  Se muestra con el nº de *respuestas medidas* (2026-10-16: 28 en total) → gana precisión cada día.
+- **Versión exacta pendiente:** `DSKU_SIS.EKU101015_log_message` tiene cada WhatsApp (inbound: RECEIVER =
+  gestor en ~98 %), pero **dejó de replicarse el 2026-10-05**. Si el equipo de datos la reactiva, se puede
+  medir cada respuesta (inbound → siguiente outbound al mismo estudiante).
+- Gráfica de evolución: una línea por gestor (top 8 por pendientes hoy), etiquetas en cada punto, eje por día.

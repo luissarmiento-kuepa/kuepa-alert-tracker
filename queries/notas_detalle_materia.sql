@@ -26,8 +26,14 @@ WITH estudiantes_activos AS (
     "670e626ab638550218b827c0", "64b847111c6495204eb3e119", "6279265fdb9de50f6405ad9d",
     "627d48d06c7678122e01d1b6", "629e7a7b3289d80f7d3d575e", "65eb4271441c110f0a76db73",
     "65eb45c11592a80f09decf06", "65eb45e58372400f07c0691e", "66fecda90cc4330faddd4409",
-    "60d2650e86a7940eab68ad7f", "60d2653f86a7940eab68ad80", "60d2657686a7940eab68ad81"
+    "60d2650e86a7940eab68ad7f", "60d2653f86a7940eab68ad80", "60d2657686a7940eab68ad81",
+    -- EFE (aliado)
+    "689a3c4ddd40951e8451e2ca", "6ab45feed4fdbc3464edf709",
+    "6340383b7dde6f68f95fcf83", "66bf59c6344be30faef91e7d", "63405ef29822f3135a19f67b",
+    "668d32f23f9b190fabc5a1c1", "6494c845683d480ca22f1f47"
   )
+  -- Solo técnicos y bachillerato: fuera el nivel de inglés "A1 Ingles_EFE"
+  AND UPPER(IFNULL(level_name, '')) NOT LIKE 'A1 INGLES%'
   AND LOWER(academic_status_name) IN (
     'regular',
     'regular en verificación',

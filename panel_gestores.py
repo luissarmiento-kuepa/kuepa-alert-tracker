@@ -32,7 +32,19 @@ def _cargar(_bq_df):
         FROM (SELECT * FROM `{TABLA}` WHERE TRUE
               QUALIFY cargado = MAX(cargado) OVER (PARTITION BY fecha_foto))
         GROUP BY 1, 2, 3 ORDER BY 1""")
-    return casos, serie
+    # TIEMPO DE RESPUESTA (aproximado): la cola guarda solo el último mensaje de cada caso, y el log de mensajes
+    # (EKU101015_log_message) dejó de replicarse el 2026-10-05. Se mide comparando fotos consecutivas: un caso que
+    # a las 6:30 de un día esperaba respuesta (último mensaje del estudiante, en t_in) y en la foto siguiente tiene
+    # como último mensaje uno del gestor (t_out) → respondió en t_out - t_in. Si el gestor escribió varias veces
+    # entre fotos, t_out es la última → tiende a sobrestimar. No ve lo que se abre y responde entre dos fotos.
+    resp = _bq_df(f"""
+        WITH f AS (SELECT * FROM `{TABLA}` WHERE TRUE
+                   QUALIFY cargado = MAX(cargado) OVER (PARTITION BY fecha_foto))
+        SELECT a.gestor, a.prog, b.fecha_foto, TIMESTAMP_DIFF(b.ult_inter, a.ult_inter, MINUTE) / 60 horas
+        FROM f a JOIN f b ON a.caso = b.caso AND b.fecha_foto = DATE_ADD(a.fecha_foto, INTERVAL 1 DAY)
+        WHERE a.estado_caso = 'queued' AND a.ult_tipo = 'message_inbound'
+          AND b.ult_tipo = 'message_outbound' AND b.ult_inter > a.ult_inter""")
+    return casos, serie, resp
 
 
 def _preparar(c):
@@ -73,17 +85,25 @@ def _metricas(cs, ahora):
     }
 
 
-def _tabla_gestores(c, ahora, prog):
+def _resp_stats(r):
+    """Mediana / promedio de horas de respuesta y cuántas se midieron (ver nota en _cargar)."""
+    return {"Respuesta (h, mediana)": r["horas"].median() if len(r) else None,
+            "Respuesta (h, promedio)": r["horas"].mean() if len(r) else None,
+            "Respuestas medidas": len(r)}
+
+
+def _tabla_gestores(c, ahora, prog, resp):
     cp = c[c["prog"] == prog]
+    rp = resp[resp["prog"] == prog]
     filas = []
     for (g, trabaja), x in cp.groupby(["gestor", "trabaja"]):
         m = _metricas(x, ahora)
         nota = ("" if trabaja or g == SIN else "⚠️ sin movimiento en 7 días")
         if trabaja and not x["gestor_activo"].any():
             nota = "inactivo en el SIS, pero trabajando"
-        filas.append({"Gestor": g, "Nota": nota, **m})
+        filas.append({"Gestor": g, "Nota": nota, **_resp_stats(rp[rp["gestor"] == g]), **m})
     t = pd.DataFrame(filas).sort_values(["Esperando respuesta", "En cola"], ascending=False)
-    total = {"Gestor": f"Total {prog}", "Nota": "", **_metricas(cp, ahora)}
+    total = {"Gestor": f"Total {prog}", "Nota": "", **_resp_stats(rp), **_metricas(cp, ahora)}
     return pd.concat([t, pd.DataFrame([total])], ignore_index=True), total
 
 
@@ -94,16 +114,18 @@ def _rojo(col, umbral):
 
 def _mostrar(t):
     fmt = {k: "{:.1f}" for k in ["Días en cola (mediana)", "Días esperando (mediana)"]}
-    fmt.update({"Horas para cerrar (mediana, 28 días)": "{:.0f}", "Siguen activos (%)": "{:.0f} %"})
+    fmt.update({"Horas para cerrar (mediana, 28 días)": "{:.0f}", "Siguen activos (%)": "{:.0f} %",
+                "Respuesta (h, mediana)": "{:.1f}", "Respuesta (h, promedio)": "{:.1f}"})
     sty = t.style.format(fmt, na_rep="—")
-    for col, u in [("Esperando respuesta", 10), ("Críticos en cola", 5), ("En cola +7 días", 10)]:
+    for col, u in [("Esperando respuesta", 10), ("Críticos en cola", 5), ("En cola +7 días", 10),
+                   ("Respuesta (h, mediana)", 24)]:
         sty = sty.apply(_rojo(col, u), axis=0)
     st.dataframe(sty, hide_index=True, use_container_width=True)
 
 
 def render_gestores(_bq_df, chart_help):
     try:
-        casos, serie = _cargar(_bq_df)
+        casos, serie, resp = _cargar(_bq_df)
     except Exception as e:
         st.error(f"No se pudo leer la cola de gestores: {e}")
         return
@@ -117,12 +139,13 @@ def render_gestores(_bq_df, chart_help):
     ver = st.selectbox("Ver", ["Todos los gestores"] + gest_disp, key="gest_panel")
     uno = ver != "Todos los gestores"
     cs = c[c["gestor"] == ver] if uno else c
+    rs = resp[resp["gestor"] == ver] if uno else resp
 
     st.markdown(f"<div class='section-title'>{'👤 ' + ver if uno else '📋 Lo pendiente hoy'} — cola al {hora}</div>",
                 unsafe_allow_html=True)
     m = _metricas(cs, ahora)
     huerf = c[c["cola"] & ~c["trabaja"]]
-    k = st.columns(5)
+    k = st.columns(6)
     k[0].metric("⏳ Esperando respuesta", m["Esperando respuesta"],
                 " · ".join(f"{p} {int(cs[cs['prog'] == p]['esperando'].sum())}" for p in PROGS), delta_color="off")
     k[1].metric("📥 En cola", m["En cola"], f"{m['Mensajes sin leer']:,} mensajes sin leer", delta_color="off")
@@ -132,6 +155,10 @@ def render_gestores(_bq_df, chart_help):
     else:
         k[3].metric("🚫 Sin atender por nadie", len(huerf), "sin gestor o gestor sin movimiento", delta_color="off")
     k[4].metric("✅ Cerrados 7 días", m["Cerrados 7 días"], f"{m['Nuevos 7 días']} nuevos", delta_color="off")
+    r = _resp_stats(rs)
+    k[5].metric("⏱️ Tiempo de respuesta", "—" if r["Respuesta (h, mediana)"] is None
+                else f"{r['Respuesta (h, mediana)']:.1f} h",
+                f"mediana · {r['Respuestas medidas']} respuestas medidas", delta_color="off")
     chart_help("<b>Esperando respuesta</b> = el caso sigue en cola y el último mensaje es del estudiante: es lo que "
                "está pendiente de verdad. Datos del Área académica, estudiantes de Bachillerato y Técnicos; se "
                "actualizan cada mañana a las 6:30.")
@@ -145,7 +172,7 @@ def render_gestores(_bq_df, chart_help):
     for p in PROGS:
         if not (cs["prog"] == p).any():
             continue
-        t, tot = _tabla_gestores(cs, ahora, p)
+        t, tot = _tabla_gestores(cs, ahora, p, rs)
         st.markdown(f"<div class='section-title'>Gestores de {p}</div>", unsafe_allow_html=True)
         st.caption(f"{tot['En cola']} en cola · {tot['Esperando respuesta']} esperando respuesta · "
                    f"{tot['Cerrados 7 días']} cerrados en 7 días")
@@ -153,28 +180,57 @@ def render_gestores(_bq_df, chart_help):
     chart_help("En rojo: 10 o más esperando, 5 o más críticos, 10 o más con más de 7 días en cola. "
                "<b>Horas para cerrar</b>: de la creación a la última actualización de los casos cerrados en 28 días "
                "(aproximado). <b>Siguen activos</b>: de los estudiantes con un caso cerrado en 28 días, qué parte "
-               "tiene hoy estado académico activo. La fuente no guarda la primera respuesta, solo el último visto.")
+               "tiene hoy estado académico activo. <b>Respuesta (h)</b>: horas entre el último mensaje del "
+               "estudiante y la respuesta del gestor, medido entre dos fotos diarias seguidas (aproximado, en rojo "
+               "si la mediana pasa de 24 h). Con pocas <i>respuestas medidas</i> la cifra aún no es confiable: "
+               "gana precisión con cada foto diaria.")
 
     # ---- evolución
-    s = serie[serie["gestor"] == ver] if uno else serie
+    # Una línea por gestor (o, viendo a uno solo, sus dos curvas), con el número en cada punto y el eje
+    # por día: la foto es diaria, un eje con horas inventaba tramos que no existen.
+    s = serie[serie["gestor"] == ver] if uno else serie[serie["gestor"] != SIN]
     dias = sorted(s["fecha_foto"].unique())
-    st.markdown("<div class='section-title'>Cómo evoluciona la cola</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Cómo evoluciona la cola — estudiantes esperando respuesta, día a día</div>",
+                unsafe_allow_html=True)
     if len(dias) < 2:
         st.info(f"La serie arrancó el {dias[0] if dias else '—'}: con un día todavía no hay tendencia. Cada mañana suma uno.")
     else:
-        agg = s.groupby(["fecha_foto", "prog"])[["cola", "esperando"]].sum().reset_index()
+        s = s.assign(dia=pd.to_datetime(s["fecha_foto"]).dt.strftime("%d %b"))
+        orden = [pd.Timestamp(d).strftime("%d %b") for d in dias]
         fig = go.Figure()
-        for p, color in zip(PROGS, ["#FD531E", "#3498DB"]):
-            a = agg[agg["prog"] == p]
-            fig.add_trace(go.Scatter(x=a["fecha_foto"], y=a["esperando"], name=f"{p} · esperando",
-                                     mode="lines+markers", line=dict(color=color, width=3)))
-            fig.add_trace(go.Scatter(x=a["fecha_foto"], y=a["cola"], name=f"{p} · en cola",
-                                     mode="lines", line=dict(color=color, width=1, dash="dot")))
-        fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h"),
+        if uno:
+            a = s.groupby("dia")[["cola", "esperando"]].sum().reindex(orden, fill_value=0)
+            fig.add_trace(go.Scatter(x=a.index, y=a["esperando"], name="Esperando respuesta",
+                                     mode="lines+markers+text", text=a["esperando"], textposition="top center",
+                                     line=dict(color="#FD531E", width=3)))
+            fig.add_trace(go.Scatter(x=a.index, y=a["cola"], name="Total en cola",
+                                     mode="lines+markers+text", text=a["cola"], textposition="bottom center",
+                                     line=dict(color="#656A71", width=2, dash="dot")))
+        else:
+            paleta = ["#FD531E", "#149852", "#9725B9", "#3498DB", "#F5A623", "#E74C3C", "#1ABC9C", "#C0C0C0"]
+            a = s.groupby(["gestor", "dia"])["esperando"].sum().unstack(fill_value=0).reindex(columns=orden, fill_value=0)
+            a = a.loc[a.iloc[:, -1].sort_values(ascending=False).index]   # leyenda: el que más debe, primero
+            resto = len(a) - 8
+            a = a.head(8)   # más de 8 líneas no se leen; el resto se ve eligiendo al gestor arriba
+            for k, (g, fila) in enumerate(a.iterrows()):
+                fig.add_trace(go.Scatter(x=orden, y=fila.values, name=f"{g} ({int(fila.iloc[-1])})",
+                                         mode="lines+markers+text", text=fila.values, textposition="top center",
+                                         line=dict(color=paleta[k % len(paleta)], width=3)))
+        eje = dict(gridcolor="#2A2A2A", color="#C0C0C0", tickfont=dict(color="#C0C0C0", size=12))
+        fig.update_layout(height=380, margin=dict(l=0, r=0, t=10, b=0),
+                          font=dict(color="#C0C0C0", family="Barlow", size=13),
+                          legend=dict(orientation="h", y=-0.15, font=dict(color="#E0E0E0", size=12)),
+                          xaxis=dict(type="category", **eje),
+                          yaxis=dict(title=dict(text="estudiantes esperando", font=dict(color="#656A71")),
+                                     rangemode="tozero", **eje),
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
-        chart_help("Línea gruesa: estudiantes esperando respuesta. Punteada: todo lo que está en cola. "
-                   "Si la gruesa baja día a día, el equipo va al día.")
+        chart_help("Cada punto = estudiantes cuyo último mensaje es suyo y siguen esperando respuesta, en la foto de "
+                   "las 6:30 de ese día. <b>Si la línea de un gestor baja, va al día; si sube, se le está "
+                   "acumulando.</b> Entre paréntesis, cuántos tiene esperando hoy."
+                   + (" La punteada es todo lo que tiene en cola." if uno else
+                      (f" Se muestran los 8 con más pendientes hoy; los otros {resto} se ven eligiéndolos en "
+                       "<i>Ver</i>." if resto > 0 else "")))
 
     # ---- lista de pendientes
     pend = cs[cs["esperando"]].sort_values("dias_espera", ascending=False)

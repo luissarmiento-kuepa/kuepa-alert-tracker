@@ -350,6 +350,12 @@ def load_historical_data():
                                          format='%Y-%m-%d', errors='coerce')
     df = df.dropna(subset=['fecha_informe'])
     df = df[df['fecha_informe'] >= pd.Timestamp('2026-01-01')]  # Solo 2026 en adelante
+    # Solo técnicos y bachillerato: fuera el nivel de inglés "A1 Ingles_EFE" (en cualquier programa)
+    # y el "Curso Intensivo de Ingles_EFE". n8n ya los excluye en la fuente desde 2026-10-15; esto
+    # limpia también los snapshots anteriores.
+    _lvl = df['level_name'].fillna('').str.upper()
+    _prg = df['program_name'].fillna('').str.upper()
+    df = df[~(_lvl.str.startswith('A1 INGLES') | _prg.str.contains('CURSO INTENSIVO DE INGLES', regex=False))]
     df['fecha_informe'] = df['fecha_informe'].dt.date
     df['gravedad'] = df['alert_type'].map(ALERT_RANK).fillna(6)
     df['fin_rank'] = df['financial_status_name'].map(FIN_RANK).fillna(99)
@@ -358,12 +364,14 @@ def load_historical_data():
     # La etapa productiva de técnicos NO dice "Productiva": viene por FASES
     # ("Etapa 1_ Adaptación", "Etapa 2_Desempeño", "Etapa3_Proyección"). Se detecta por
     # el nombre de la fase para que esos estudiantes aparezcan en Productiva (antes caían en 'Otra').
-    LECTIVA_KEYWORDS = ['Introducción', 'Transición', 'Etapa Lectiva', 'Módulo 0', 'Fundamentación']
-    PRODUCTIVA_KEYWORDS = ['Productiva', 'Adaptación', 'Desempeño', 'Proyección']
+    # Comparación en minúsculas: los niveles de EFE vienen como "INTRODUCCIÓN", "Lectivo.",
+    # "Etapa lectiva", "Lectiva turismo" ('lectiv' los cubre todos).
+    LECTIVA_KEYWORDS = ['introducción', 'transición', 'lectiv', 'módulo 0', 'fundamentación']
+    PRODUCTIVA_KEYWORDS = ['productiva', 'adaptación', 'desempeño', 'proyección']
     def clasificar_etapa(level):
         if pd.isna(level) or level == '':
             return 'Sin etapa'
-        level_str = str(level)
+        level_str = str(level).lower()
         for kw in PRODUCTIVA_KEYWORDS:
             if kw in level_str:
                 return 'Productiva'
@@ -372,6 +380,15 @@ def load_historical_data():
                 return 'Lectiva'
         return 'Otra'
     df['etapa'] = df['level_name'].apply(clasificar_etapa)
+
+    # ALIADO (solo técnicos): EFE si el programa O el nivel dicen "EFE" como palabra
+    # ("EFE _TLMV", "T.L. Hotelería y turismo_efe"). El resto de técnicos = HST; bachillerato = '—'.
+    _txt = (df['program_name'].fillna('') + ' ' + df['level_name'].fillna('')).str.upper()
+    _es_efe = _txt.str.contains(r'(?:^|[^A-Z])EFE(?:[^A-Z]|$)', regex=True)
+    _es_bach = df['program_name'].fillna('').str.contains('Bachillerato', case=False)
+    df['aliado'] = 'HST'
+    df.loc[_es_efe, 'aliado'] = 'EFE'
+    df.loc[_es_bach, 'aliado'] = '—'
 
     # Defensa anti-duplicados: el nodo n8n de Hoja 1 hace appendOrUpdate SIN columna de
     # match, así que si el workflow corre dos veces el mismo día appendea todo el snapshot
@@ -492,6 +509,9 @@ with st.sidebar:
     st.markdown("<p style='color:#656A71; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.1em; font-weight:700; margin: 12px 0 4px 0'>🤝 Patrocinio (técnicos)</p>", unsafe_allow_html=True)
     patrocinio_sel = st.multiselect("", ['Sí', 'No'], default=[], label_visibility="collapsed",
                                     key="patro", placeholder="Todos")
+    st.markdown("<p style='color:#656A71; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.1em; font-weight:700; margin: 12px 0 4px 0'>🏫 Aliado (técnicos)</p>", unsafe_allow_html=True)
+    aliado_sel = st.multiselect("", ['HST', 'EFE'], default=[], label_visibility="collapsed",
+                                key="aliado", placeholder="Todos")
     # Diagnóstico: confirma si el Sheet de patrocinio se pudo leer (evita el "todo en —" silencioso).
     _pmap, _perr = _load_patrocinio_raw()
     if _pmap:
@@ -508,6 +528,7 @@ if etapas_sel: mask &= df_hist['etapa'].isin(etapas_sel)
 if programas: mask &= df_hist['program_name'].isin(programas)
 if gestores: mask &= df_hist['gestor_asignado'].isin(gestores)
 if patrocinio_sel: mask &= df_hist['patrocinado'].isin(patrocinio_sel)
+if aliado_sel: mask &= df_hist['aliado'].isin(aliado_sel)
 df_principal = df_hist[mask]
 
 # ---- HEADER ----
@@ -1405,7 +1426,7 @@ def render_descarga_conexion():
 
     cols = ['user_incremental', 'user_full_name', 'program_name', 'level_name', 'academic_status_name',
             'gestor_asignado', 'alert_type', 'dias_desconexion', 'ultimo_login', 'alerta_ant',
-            'financial_status_name', 'patrocinado']
+            'financial_status_name', 'patrocinado', 'aliado']
     tabla = (d.sort_values(['gravedad', 'fin_rank'], ascending=False)[cols].reset_index(drop=True)
              .rename(columns={
                  'user_incremental': 'ID', 'user_full_name': 'Estudiante', 'program_name': 'Programa',
@@ -1413,7 +1434,7 @@ def render_descarga_conexion():
                  'gestor_asignado': 'Gestor', 'alert_type': 'Alerta Login',
                  'dias_desconexion': 'Días Desconexión', 'ultimo_login': 'Último Login',
                  'alerta_ant': 'Alerta Semana Anterior', 'financial_status_name': 'Estado Financiero',
-                 'patrocinado': 'Patrocinado',
+                 'patrocinado': 'Patrocinado', 'aliado': 'Aliado',
              }))
     st.dataframe(tabla, use_container_width=True, height=320)
     slug = 'todos' if gest == 'Todos los gestores' else gest.lower().replace(' ', '_')
@@ -1463,6 +1484,7 @@ with tab_conexion:
         if etapas_sel: mask_v &= df_hist['etapa'].isin(etapas_sel)
         if programas: mask_v &= df_hist['program_name'].isin(programas)
         if gestores:  mask_v &= df_hist['gestor_asignado'].isin(gestores)
+        if aliado_sel: mask_v &= df_hist['aliado'].isin(aliado_sel)
         df_vieja = df_hist[mask_v]
     
         df_v = df_vieja[['user_id', 'gravedad', 'gestor_asignado']].rename(columns={'gravedad': 'gravedad_viejo', 'gestor_asignado': 'gestor_responsable'})
@@ -1558,6 +1580,7 @@ with tab_conexion:
             if etapas_sel: mask_f &= df_hist['etapa'].isin(etapas_sel)
             if programas: mask_f &= df_hist['program_name'].isin(programas)
             if gestores:  mask_f &= df_hist['gestor_asignado'].isin(gestores)
+            if aliado_sel: mask_f &= df_hist['aliado'].isin(aliado_sel)
             df_fecha = df_hist[mask_f]
             total_fecha = len(df_fecha)
             for alert in ALERT_ORDER:

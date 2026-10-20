@@ -1446,8 +1446,8 @@ def render_descarga_conexion():
                 "snapshot previo (— si no estaba). Respeta los filtros de etapa, programa y patrocinio.")
     st.divider()
 
-tab_360, tab_conexion, tab_reprob, tab_gestores = st.tabs(
-    ["🎯 Riesgo 360", "🔌 Conexión", "📕 Reprobación", "👥 Gestores"]
+tab_360, tab_conexion, tab_reprob, tab_gestores, tab_envios = st.tabs(
+    ["🎯 Riesgo 360", "🔌 Conexión", "📕 Reprobación", "👥 Gestores", "📬 Envíos"]
 )
 
 with tab_360:
@@ -2067,3 +2067,8 @@ with tab_gestores:
     # Desempeño diario de gestores (cola de gestión). Módulo aparte: panel_gestores.py
     from panel_gestores import render_gestores
     render_gestores(_bq_df, _chart_help)
+
+with tab_envios:
+    # Correos a estudiantes: a quiénes, qué, cuántos y quiénes faltan. Módulo aparte: panel_envios.py
+    from panel_envios import render_envios
+    render_envios(_bq_df, _chart_help)

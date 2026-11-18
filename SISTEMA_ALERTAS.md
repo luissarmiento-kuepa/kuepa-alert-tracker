@@ -346,3 +346,15 @@ Completado. El workflow ejecuta semanalmente y popula 3370 filas cada ejecución
   columnas `origen` y `cierre_cortesia` (booleano calculado en n8n desde `LAST_INTERACTION_PREVIEW`; el texto
   NO se guarda). Pobladas desde la carga del 2026-10-17; antes salen vacías (se cuentan como sin responder).
   Limitación: lo resuelto por llamada se ve como "sin responder".
+
+---
+
+## 9. Incidente 2026-10-19 — tablas borradas por expiración
+
+- El dataset `alertas_academicas` tenía `defaultTableExpirationMs = 60 días`: las 5 tablas `historico_*`
+  (creadas ~2026-08-19) se borraron solas el fin de semana del 18-oct y el dashboard cayó (404).
+- **Restauradas** con time travel (`bq cp tabla@<ms>`, ventana de 7 días), con datos hasta la corrida del
+  2026-10-13. Se les quitó la expiración y se quitó la expiración por defecto del dataset.
+- La corrida n8n del **2026-10-19** falló (tablas inexistentes a esa hora) → hay que re-ejecutarla a mano.
+- Pendiente de decidir: `cola_gestores`, `historico_matriculas`, `historico_cohorte_nuevos` y `log_informes`
+  siguen con **expiración de particiones a 60 días** (borran sus días viejos).
